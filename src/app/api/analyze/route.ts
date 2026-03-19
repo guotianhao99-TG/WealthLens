@@ -156,6 +156,8 @@ Return ONLY valid JSON without any markdown formatting, code blocks, or preamble
 
 const SYSTEM_PROMPTS: Record<Exclude<Mode, "person">, string> = {
   car: `You are an automotive expert.
+Only identify real full-size vehicles. Ignore toys, scale models, posters, and miniatures.
+If the image contains only a toy or model car, return { "error": "No real vehicle found" }
 Analyze this image and identify the vehicle.
 Do NOT guess the exact year. List all possible production years for this model.
 If confidence >= 70, return:
@@ -262,6 +264,38 @@ async function fetchSerperListings(query: string): Promise<SerperListing[]> {
       price: r.price ?? "",
       thumbnail: r.imageUrl ?? r.thumbnailUrl ?? r.thumbnail ?? "",
       link: `https://www.google.com/search?tbm=shop&q=${encodeURIComponent(query)}`,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Fetch automotive pricing results from Serper web search.
+ * Uses the /search endpoint so site: operators (cars.com, autotrader, edmunds)
+ * are respected — the Serper /shopping endpoint does not index those sites.
+ * Price info is extracted from each result's snippet.
+ */
+async function fetchSerperAutomotiveListings(query: string): Promise<SerperListing[]> {
+  try {
+    const res = await fetch("https://google.serper.dev/search", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-KEY": process.env.SERPER_API_KEY!,
+      },
+      body: JSON.stringify({ q: query, num: 6, gl: "us", hl: "en" }),
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as {
+      organic?: Array<{ title?: string; snippet?: string; link?: string; imageUrl?: string }>;
+    };
+    return (data.organic ?? []).slice(0, 3).map((r) => ({
+      title: r.title ?? "",
+      // Snippets from automotive sites typically contain price strings like "$15,995"
+      price: r.snippet ?? "",
+      thumbnail: r.imageUrl ?? "",
+      link: r.link ?? `https://www.google.com/search?q=${encodeURIComponent(query)}`,
     }));
   } catch {
     return [];
@@ -537,6 +571,12 @@ export async function POST(req: NextRequest) {
       }
 
       if (typedMode === "car") {
+        // Handle toy/model car rejection from GPT-4o
+        const maybeError = claudeParsed as { error?: string };
+        if (maybeError.error) {
+          return NextResponse.json({ error: maybeError.error }, { status: 422 });
+        }
+
         const car = claudeParsed as ClaudeCarHigh | ClaudeCarLow;
         carRaw = car;
         const isHighConfidence = "brand" in car;
@@ -547,6 +587,13 @@ export async function POST(req: NextRequest) {
           ? (car as ClaudeCarHigh).model
           : (car as ClaudeCarLow).candidates[0]?.model ?? "Unknown";
         const series = isHighConfidence ? (car as ClaudeCarHigh).series : undefined;
+        const possibleYears = isHighConfidence ? ((car as ClaudeCarHigh).possibleYears ?? []) : [];
+        // Use middle year of the production range for the most representative pricing
+        const yearToken = possibleYears.length
+          ? possibleYears[Math.floor(possibleYears.length / 2)]
+          : "";
+        const seriesToken = series ? ` ${series}` : "";
+        const searchQuery = `${yearToken ? yearToken + " " : ""}${brand}${seriesToken} ${carModel} new price OR used price site:cars.com OR site:autotrader.com OR site:edmunds.com`;
 
         normalizedItems = [
           {
@@ -556,7 +603,7 @@ export async function POST(req: NextRequest) {
             model: carModel,
             confidence: car.confidence,
             visualAnomalies: [],
-            searchQuery: `${brand}${series ? " " + series : ""} ${carModel} market value resale price`,
+            searchQuery,
           },
         ];
       } else {
@@ -567,8 +614,14 @@ export async function POST(req: NextRequest) {
     }
 
     // ── 3. Call Serper in parallel for every item ─────────────────────────────
+    // Car items use the automotive web-search endpoint (respects site: operators);
+    // all other items use the shopping endpoint.
     const allListings = await Promise.all(
-      normalizedItems.map((item) => fetchSerperListings(item.searchQuery))
+      normalizedItems.map((item) =>
+        item.category === "car"
+          ? fetchSerperAutomotiveListings(item.searchQuery)
+          : fetchSerperListings(item.searchQuery)
+      )
     );
 
     // ── 4. Assemble enriched items ────────────────────────────────────────────
