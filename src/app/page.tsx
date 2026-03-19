@@ -47,6 +47,8 @@ interface FullItem {
   listings: Listing[];
   minPrice: number;
   maxPrice: number;
+  x?: number;
+  y?: number;
 }
 
 interface BlurredItem {
@@ -593,31 +595,85 @@ function ItemCard({ item, index }: { item: FullItem; index: number }) {
 
 // ─── UNLOCKED — PERSON MODE ───────────────────────────────────────────────────
 
+// Fallback grid positions (% from top-left) used when GPT-4o doesn't return x/y.
+const FALLBACK_POSITIONS = [
+  { x: 25, y: 25 }, { x: 75, y: 25 }, { x: 25, y: 70 },
+  { x: 75, y: 70 }, { x: 50, y: 48 }, { x: 50, y: 18 },
+  { x: 15, y: 48 }, { x: 85, y: 48 }, { x: 50, y: 78 },
+];
+
 function PersonMode({ imageUrl, items }: { imageUrl: string; items: FullItem[] }) {
+  const [activeId, setActiveId] = useState<number | null>(null);
   const totalMin = items.reduce((s, i) => s + i.minPrice, 0);
   const totalMax = items.reduce((s, i) => s + i.maxPrice, 0);
 
   return (
     <div className="flex flex-col gap-6 w-full">
-      {/* Image with number badges overlay */}
+      {/* Image with interactive hotspot dots */}
       <div className="relative w-full rounded-2xl overflow-hidden">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src={imageUrl} alt="Scan" className="w-full object-cover" style={{ maxHeight: 360 }} />
-        <div className="absolute inset-0 pointer-events-none">
-          {items.slice(0, 5).map((item, i) => {
-            const positions = [
-              "top-4 left-4", "top-4 right-4", "bottom-4 left-4",
-              "bottom-4 right-4", "top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2",
-            ];
-            return (
-              <div key={item.id}
-                className={`absolute ${positions[i] ?? "top-4 left-4"} w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold`}
-                style={{ background: "#e53e3e", color: "#fff", border: "2px solid #fff" }}>
+
+        {/* Dismiss tooltip when clicking image background */}
+        {activeId !== null && (
+          <div className="absolute inset-0 z-0" onClick={() => setActiveId(null)} />
+        )}
+
+        {items.map((item, i) => {
+          const fallback = FALLBACK_POSITIONS[i] ?? { x: 20, y: 20 };
+          const x = item.x ?? fallback.x;
+          const y = item.y ?? fallback.y;
+          const isActive = activeId === item.id;
+          // Flip tooltip to stay inside image bounds
+          const tipLeft = x > 55;
+          const tipUp   = y > 55;
+
+          return (
+            <div
+              key={item.id}
+              className="absolute z-10"
+              style={{ left: `${x}%`, top: `${y}%`, transform: "translate(-50%, -50%)" }}
+            >
+              {/* Clickable dot */}
+              <button
+                onClick={(e) => { e.stopPropagation(); setActiveId(isActive ? null : item.id); }}
+                className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold cursor-pointer transition-transform hover:scale-110 focus:outline-none"
+                style={{
+                  background: isActive ? "#fff" : GOLD,
+                  color: isActive ? GOLD : "#000",
+                  border: "2px solid #fff",
+                  boxShadow: "0 2px 8px rgba(0,0,0,0.6)",
+                }}
+              >
                 {i + 1}
-              </div>
-            );
-          })}
-        </div>
+              </button>
+
+              {/* Tooltip popup */}
+              {isActive && (
+                <div
+                  className="absolute z-20 rounded-xl p-3 text-left shadow-2xl"
+                  style={{
+                    background: "#111",
+                    border: `1px solid ${GOLD}`,
+                    width: 190,
+                    ...(tipLeft  ? { right: "calc(100% + 10px)" } : { left: "calc(100% + 10px)" }),
+                    ...(tipUp    ? { bottom: 0 }                  : { top: 0 }),
+                  }}
+                >
+                  <p className="text-xs text-zinc-400 uppercase tracking-wide mb-0.5">
+                    {categoryIcon(item.category)} {item.category}
+                  </p>
+                  <p className="text-sm font-bold leading-tight" style={{ color: GOLD }}>
+                    {item.brand} {item.model}
+                    {item.year ? ` (${item.year})` : ""}
+                  </p>
+                  <p className="text-xs text-white mt-1">{item.priceRange}</p>
+                  <p className="text-xs text-zinc-500 mt-0.5">{item.confidence}% confidence</p>
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
 
       {/* Item cards */}

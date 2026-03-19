@@ -23,6 +23,8 @@ interface ClaudeItem {
   confidence: number;
   visualAnomalies?: VisualAnomaly[];
   searchQuery: string;
+  x?: number;
+  y?: number;
 }
 
 interface ClaudeCarHigh {
@@ -61,6 +63,8 @@ interface EnrichedItem {
   listings: SerperListing[];
   minPrice: number;
   maxPrice: number;
+  x?: number;
+  y?: number;
 }
 
 // ─── System Prompts ───────────────────────────────────────────────────────────
@@ -81,8 +85,11 @@ Return ONLY a valid JSON array with this exact structure:
   "visualAnomalies": [
     {"description": "stitching pattern inconsistent", "riskWeight": 25}
   ],
-  "searchQuery": "Louis Vuitton Neverfull MM resale price 2024"
+  "searchQuery": "Louis Vuitton Neverfull MM resale price 2024",
+  "x": 35,
+  "y": 60
 }]
+x and y are the estimated percentage position (0-100) of the item's center within the image, where x=0 is the left edge, x=100 is the right edge, y=0 is the top edge, y=100 is the bottom edge.
 Return ONLY valid JSON without any markdown formatting, code blocks, or preambles.`,
 
   car: `You are an automotive expert.
