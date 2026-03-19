@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import { kv } from "@vercel/kv";
 import { v4 as uuidv4 } from "uuid";
 
@@ -192,7 +192,7 @@ async function fetchSerperListings(query: string): Promise<SerperListing[]> {
       title: r.title ?? "",
       price: r.price ?? "",
       thumbnail: r.imageUrl ?? r.thumbnailUrl ?? r.thumbnail ?? "",
-      link: r.link ?? "",
+      link: `https://www.google.com/search?tbm=shop&q=${encodeURIComponent(query)}`,
     }));
   } catch {
     return [];
@@ -225,7 +225,7 @@ function extractJSON(text: string): string {
 
 export async function POST(req: NextRequest) {
   try {
-    console.log("KEY CHECK:", process.env.ANTHROPIC_API_KEY?.slice(0, 12));
+    console.log("KEY CHECK:", process.env.OPENAI_API_KEY?.slice(0, 12));
 
     // ── 1. Parse & validate request body ─────────────────────────────────────
     const body = (await req.json()) as {
@@ -250,21 +250,27 @@ export async function POST(req: NextRequest) {
 
     const typedMode = mode as Mode;
 
-    // ── 2. Call Claude API with the image ─────────────────────────────────────
+    // ── 2. Call GPT-5.4 API with the image ───────────────────────────────────
     const { data: imageData, mediaType } = parseBase64Image(image);
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-    const claudeMessage = await anthropic.messages.create({
-      model: "claude-sonnet-4-5",
-      max_tokens: 4096,
-      system: SYSTEM_PROMPTS[typedMode],
+    const response = await openai.chat.completions.create({
+      model: "gpt-5.4",
+      max_tokens: 1000,
       messages: [
+        {
+          role: "system",
+          content: SYSTEM_PROMPTS[typedMode],
+        },
         {
           role: "user",
           content: [
             {
-              type: "image",
-              source: { type: "base64", media_type: mediaType, data: imageData },
+              type: "image_url",
+              image_url: {
+                url: `data:${mediaType};base64,${imageData}`,
+                detail: "high",
+              },
             },
             {
               type: "text",
@@ -275,12 +281,9 @@ export async function POST(req: NextRequest) {
       ],
     });
 
-    // ── 3. Parse Claude's JSON response ───────────────────────────────────────
-    const rawText =
-      claudeMessage.content[0]?.type === "text"
-        ? claudeMessage.content[0].text
-        : "";
-    console.log("Raw Claude text:", rawText);
+    // ── 3. Parse GPT-5.4's JSON response ─────────────────────────────────────
+    const rawText = response.choices[0].message.content || "";
+    console.log("Raw GPT-4o text:", rawText);
     const cleanedText = extractJSON(rawText);
 
     let claudeParsed: unknown;
@@ -325,7 +328,7 @@ export async function POST(req: NextRequest) {
       const item = claudeParsed as ClaudeItem;
       normalizedItems = [{ ...item, id: 1 }];
     } else {
-      // person — Claude returns an array
+      // person — GPT-4o returns an array
       normalizedItems = claudeParsed as ClaudeItem[];
     }
 
