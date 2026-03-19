@@ -94,7 +94,7 @@ Return ONLY a valid JSON object with this exact structure:
     "visualAnomalies": [
       {"description": "stitching pattern inconsistent", "riskWeight": 25}
     ],
-    "searchQuery": "Louis Vuitton Neverfull MM new price buy 2024 site:nordstrom.com OR site:net-a-porter.com OR site:farfetch.com OR site:ssense.com",
+    "searchQuery": "Louis Vuitton Neverfull MM buy price",
     "x": 35,
     "y": 60
   }],
@@ -147,7 +147,7 @@ Return ONLY valid JSON with this exact structure:
     {"description": "logo font spacing abnormal", "riskWeight": 25},
     {"description": "hardware color inconsistent", "riskWeight": 20}
   ],
-  "searchQuery": "Chanel Classic Flap Medium new price buy 2024 site:nordstrom.com OR site:net-a-porter.com OR site:farfetch.com OR site:ssense.com"
+  "searchQuery": "Chanel Classic Flap Medium buy price"
 }
 Return ONLY valid JSON without any markdown formatting, code blocks, or preambles.`,
 };
@@ -172,21 +172,23 @@ function isVintageBrand(brand: string): boolean {
 }
 
 /**
- * Build the appropriate Serper search query for a fashion/goods item.
- * - Active brands   → new retail query targeting major retail sites.
- * - Unknown brand   → generic new-retail query.
- * - Vintage/discontinued brands → resale query targeting secondhand sites.
+ * Build the appropriate Serper shopping search query for a fashion/goods item.
+ * Queries are sent to Serper /shopping which does NOT support site: operators —
+ * keeping queries simple lets the shopping API return actual priced listings.
+ * - Active brands          → "[brand] [model] buy price"
+ * - Unknown brand          → "[model] price"
+ * - Vintage/discontinued   → "[brand] [model] resale secondhand price"
  */
 function buildItemSearchQuery(brand: string, model: string): string {
   const b = (brand ?? "").trim();
   const m = (model ?? "").trim();
   if (!b || b === "Unknown") {
-    return `${m} buy new price 2024 site:nordstrom.com OR site:net-a-porter.com OR site:farfetch.com OR site:ssense.com`;
+    return `${m} price`;
   }
   if (isVintageBrand(b)) {
-    return `${b} ${m} resale secondhand price site:vestiairecollective.com OR site:therealreal.com OR site:1stdibs.com`;
+    return `${b} ${m} resale secondhand price`;
   }
-  return `${b} ${m} new price buy 2024 site:nordstrom.com OR site:net-a-porter.com OR site:farfetch.com OR site:ssense.com`;
+  return `${b} ${m} buy price`;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
