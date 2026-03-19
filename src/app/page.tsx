@@ -602,6 +602,24 @@ const FALLBACK_POSITIONS = [
 
 function PersonMode({ imageUrl, items, faces = [] }: { imageUrl: string; items: FullItem[]; faces?: FaceRegion[] }) {
   const [activeId, setActiveId] = useState<number | null>(null);
+  // imgRect tracks the rendered image bounds so dot positions map from
+  // GPT-4o's percentage-of-original-image coordinates to exact pixel
+  // positions on the displayed image, regardless of container padding.
+  const [imgRect, setImgRect] = useState<{ w: number; h: number; top: number; left: number } | null>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
+
+  const measureImage = () => {
+    if (!imgRef.current) return;
+    const r = imgRef.current.getBoundingClientRect();
+    const p = imgRef.current.parentElement!.getBoundingClientRect();
+    setImgRect({ w: r.width, h: r.height, top: r.top - p.top, left: r.left - p.left });
+  };
+
+  useEffect(() => {
+    window.addEventListener("resize", measureImage);
+    return () => window.removeEventListener("resize", measureImage);
+  }, []);
+
   const totalMin = items.reduce((s, i) => s + i.minPrice, 0);
   const totalMax = items.reduce((s, i) => s + i.maxPrice, 0);
 
@@ -610,42 +628,49 @@ function PersonMode({ imageUrl, items, faces = [] }: { imageUrl: string; items: 
       {/* Image with interactive hotspot dots */}
       <div className="relative w-full rounded-2xl overflow-hidden">
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={imageUrl} alt="Scan" className="w-full block" style={{ height: "auto" }} />
+        <img
+          ref={imgRef}
+          src={imageUrl}
+          alt="Scan"
+          className="w-full block"
+          style={{ height: "auto" }}
+          onLoad={measureImage}
+        />
 
         {/* Dismiss tooltip when clicking image background */}
         {activeId !== null && (
           <div className="absolute inset-0 z-0" onClick={() => setActiveId(null)} />
         )}
 
-        {items.map((item, i) => {
+        {imgRect && items.map((item, i) => {
           const fallback = FALLBACK_POSITIONS[i] ?? { x: 20, y: 20 };
-          const x = item.x ?? fallback.x;
+          const xPct = item.x ?? fallback.x;
           // Guard: never render a dot in the upper face region (top 15% of image)
-          const y = Math.max(15, item.y ?? fallback.y);
+          const yPct = Math.max(15, item.y ?? fallback.y);
+          // Convert GPT-4o's % of original image → px offset within container
+          const left = imgRect.left + (xPct / 100) * imgRect.w;
+          const top  = imgRect.top  + (yPct / 100) * imgRect.h;
           const isActive = activeId === item.id;
           // Flip tooltip to stay inside image bounds
-          const tipLeft = x > 55;
-          const tipUp   = y > 55;
+          const tipLeft = xPct > 55;
+          const tipUp   = yPct > 55;
 
           return (
             <div
               key={item.id}
               className="absolute z-10"
-              style={{ left: `${x}%`, top: `${y}%`, transform: "translate(-50%, -50%)" }}
+              style={{ left, top, transform: "translate(-50%, -50%)" }}
             >
-              {/* Clickable dot */}
+              {/* Clickable dot — red, 14 px, no label */}
               <button
                 onClick={(e) => { e.stopPropagation(); setActiveId(isActive ? null : item.id); }}
-                className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold cursor-pointer transition-transform hover:scale-110 focus:outline-none"
+                className="w-3.5 h-3.5 rounded-full cursor-pointer transition-transform hover:scale-125 focus:outline-none"
                 style={{
-                  background: isActive ? "#fff" : GOLD,
-                  color: isActive ? GOLD : "#000",
-                  border: "2px solid #fff",
-                  boxShadow: "0 2px 8px rgba(0,0,0,0.6)",
+                  background: isActive ? "#fff" : "#e53e3e",
+                  border: "1.5px solid #fff",
+                  boxShadow: "0 1px 6px rgba(0,0,0,0.7)",
                 }}
-              >
-                {i + 1}
-              </button>
+              />
 
               {/* Tooltip popup */}
               {isActive && (
