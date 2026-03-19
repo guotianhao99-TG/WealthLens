@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { kv } from "@vercel/kv";
 import { v4 as uuidv4 } from "uuid";
-import sharp from "sharp";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -13,23 +12,6 @@ type ImageMediaType = "image/jpeg" | "image/png" | "image/gif" | "image/webp";
 interface VisualAnomaly {
   description: string;
   riskWeight: number;
-}
-
-// Stage-1 detection result
-interface DetectedItem {
-  id: number;
-  category: string;
-  bbox: { top: number; left: number; width: number; height: number };
-}
-
-// Stage-2 identification result
-interface IdentifiedItem {
-  brand: string;
-  model: string;
-  year?: string;
-  confidence: number;
-  visualAnomalies?: VisualAnomaly[];
-  searchQuery: string;
 }
 
 interface ClaudeItem {
@@ -94,48 +76,38 @@ interface EnrichedItem {
 
 // ─── System Prompts ───────────────────────────────────────────────────────────
 
-// Stage-1: Detect all items + faces, return bboxes only
-const PERSON_STAGE1_PROMPT = `Identify all visible items in this image (clothing, bags, shoes, accessories, watches, jewelry).
+const SYSTEM_PROMPTS: Record<Mode, string> = {
+  person: `You are a fashion and goods expert.
+Analyze this image and identify every visible item including clothing, shoes, bags, accessories, watches, and jewelry regardless of brand or price point.
+Focus on the items themselves, not who is wearing them.
+If the brand is not identifiable, use "Unknown" for the brand field and describe the item visually for the model field (e.g. "black leather crossbody bag"). Never leave model empty.
+Only identify what is clearly visible, do not guess hidden items.
 Also detect any human faces and return their bounding boxes.
-Return ONLY valid JSON with this exact structure:
+Return ONLY a valid JSON object with this exact structure:
 {
-  "items": [
-    { "id": 1, "category": "bag", "bbox": { "top": 20, "left": 30, "width": 15, "height": 20 } }
-  ],
+  "items": [{
+    "id": 1,
+    "category": "bag",
+    "brand": "Louis Vuitton",
+    "model": "Neverfull MM",
+    "confidence": 90,
+    "visualAnomalies": [
+      {"description": "stitching pattern inconsistent", "riskWeight": 25}
+    ],
+    "searchQuery": "Louis Vuitton Neverfull MM new price buy 2024 site:nordstrom.com OR site:net-a-porter.com OR site:farfetch.com OR site:ssense.com",
+    "x": 35,
+    "y": 60
+  }],
   "faces": [
-    { "x": 42, "y": 5, "w": 18, "h": 22 }
+    {"x": 42, "y": 5, "w": 18, "h": 22}
   ]
 }
-Bounding box values are percentages of image dimensions (0-100).
-For items: bbox.top/left are the top-left corner; bbox.width/height are the size.
-For faces: x/y are the top-left corner; w/h are the size.
-Never place a hotspot on a person's face. Only detect clothing, bags, shoes, accessories, watches, and jewelry.
-Return ONLY valid JSON without any markdown formatting, code blocks, or preambles.`;
+Return x and y as the exact center coordinates of each item as a percentage of the total image dimensions. Be as precise as possible. x=0 is left, x=100 is right, y=0 is top, y=100 is bottom.
+Never place a hotspot on a person's face. Only place hotspots on clothing, bags, shoes, accessories, watches, and jewelry.
+For faces: x and y are the top-left corner of the face bounding box as a percentage, w and h are the width and height as a percentage of the image dimensions.
+If no faces are detected, return an empty array for faces.
+Return ONLY valid JSON without any markdown formatting, code blocks, or preambles.`,
 
-// Stage-2: Identify a specific item in the full image by coordinate
-function personStage2Prompt(category: string, cx: number, cy: number): string {
-  return `Focus on the ${category} located at approximately x:${cx.toFixed(1)}%, y:${cy.toFixed(1)}% of this image.
-Identify the brand and model of ONLY this specific item.
-Look for logos, patterns, hardware, labels, or any distinctive features.
-Return ONLY valid JSON with this exact structure:
-{
-  "brand": "Louis Vuitton",
-  "model": "Neverfull MM",
-  "year": "2022",
-  "confidence": 90,
-  "visualAnomalies": [
-    { "description": "stitching pattern inconsistent", "riskWeight": 25 }
-  ],
-  "searchQuery": "Louis Vuitton Neverfull MM new retail price"
-}
-Rules:
-- If the brand is truly unidentifiable, set brand to "Unknown" and describe what you see for model (e.g. "black leather crossbody bag" or "white low-top sneaker"). Never leave model empty.
-- Minimum confidence is 30. Never return confidence: 0.
-- If no visual anomalies are detected, return an empty array for visualAnomalies.
-Return ONLY valid JSON without any markdown formatting, code blocks, or preambles.`;
-}
-
-const SYSTEM_PROMPTS: Record<Exclude<Mode, "person">, string> = {
   car: `You are an automotive expert.
 Only identify real full-size vehicles. Ignore toys, scale models, posters, and miniatures.
 If the image contains only a toy or model car, return { "error": "No real vehicle found" }
@@ -292,7 +264,6 @@ async function fetchSerperListings(query: string): Promise<SerperListing[]> {
  * Fetch automotive pricing results from Serper web search.
  * Uses the /search endpoint so site: operators (cars.com, autotrader, edmunds)
  * are respected — the Serper /shopping endpoint does not index those sites.
- * Price info is extracted from each result's snippet.
  */
 async function fetchSerperAutomotiveListings(query: string): Promise<SerperListing[]> {
   try {
@@ -310,7 +281,6 @@ async function fetchSerperAutomotiveListings(query: string): Promise<SerperListi
     };
     return (data.organic ?? []).slice(0, 3).map((r) => ({
       title: r.title ?? "",
-      // Snippets from automotive sites typically contain price strings like "$15,995"
       price: r.snippet ?? "",
       thumbnail: r.imageUrl ?? "",
       link: r.link ?? `https://www.google.com/search?q=${encodeURIComponent(query)}`,
@@ -331,157 +301,6 @@ function extractJSON(text: string): string {
   if (arrayMatch) return arrayMatch[0];
   if (objectMatch) return objectMatch[0];
   return text.trim();
-}
-
-/**
- * Crop a region out of a base64-encoded image using sharp.
- * bbox values are percentages of image dimensions (0-100).
- * Returns a base64-encoded JPEG of the cropped region.
- */
-async function cropImage(
-  base64Data: string,
-  mediaType: ImageMediaType,
-  bbox: { top: number; left: number; width: number; height: number }
-): Promise<string> {
-  const buffer = Buffer.from(base64Data, "base64");
-  const img = sharp(buffer);
-  const meta = await img.metadata();
-  const imgW = meta.width ?? 800;
-  const imgH = meta.height ?? 800;
-
-  // Clamp to image bounds
-  const left   = Math.max(0, Math.round((bbox.left   / 100) * imgW));
-  const top    = Math.max(0, Math.round((bbox.top    / 100) * imgH));
-  const width  = Math.min(imgW - left, Math.max(1, Math.round((bbox.width  / 100) * imgW)));
-  const height = Math.min(imgH - top,  Math.max(1, Math.round((bbox.height / 100) * imgH)));
-
-  const cropped = await img
-    .extract({ left, top, width, height })
-    .jpeg({ quality: 90 })
-    .toBuffer();
-
-  return cropped.toString("base64");
-}
-
-// ─── Person mode — two-stage pipeline ────────────────────────────────────────
-
-async function runPersonPipeline(
-  openai: OpenAI,
-  imageData: string,
-  mediaType: ImageMediaType
-): Promise<{ items: ClaudeItem[]; faces: FaceRegion[] }> {
-
-  // ── Stage 1: detect items + faces ──────────────────────────────────────────
-  const stage1Response = await openai.chat.completions.create({
-    model: "gpt-4o",
-    max_tokens: 1024,
-    messages: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "image_url",
-            image_url: { url: `data:${mediaType};base64,${imageData}`, detail: "high" },
-          },
-          { type: "text", text: PERSON_STAGE1_PROMPT },
-        ],
-      },
-    ],
-  });
-
-  const stage1Raw = stage1Response.choices[0].message.content ?? "";
-  console.log("Stage-1 raw:", stage1Raw);
-
-  let detectedItems: DetectedItem[] = [];
-  let faces: FaceRegion[] = [];
-
-  try {
-    const parsed = JSON.parse(extractJSON(stage1Raw)) as {
-      items?: DetectedItem[];
-      faces?: FaceRegion[];
-    };
-    detectedItems = parsed.items ?? [];
-    faces = parsed.faces ?? [];
-  } catch {
-    console.error("Stage-1 JSON parse failed:", stage1Raw);
-    return { items: [], faces: [] };
-  }
-
-  console.log(`Stage-1 detected ${detectedItems.length} items, ${faces.length} faces`);
-
-  // ── Stage 2: identify each item using the full image + coordinate focus ──────
-  // Sending the full original image (not a crop) gives GPT-4o full context
-  // for logos, patterns and surrounding context that crops often lose.
-  const fullImageUrl = `data:${mediaType};base64,${imageData}`;
-
-  const stage2Results = await Promise.all(
-    detectedItems.map(async (detected): Promise<ClaudeItem> => {
-      // Dot sits at the bbox centre
-      const x = detected.bbox.left + detected.bbox.width  / 2;
-      const y = detected.bbox.top  + detected.bbox.height / 2;
-
-      try {
-        const stage2Response = await openai.chat.completions.create({
-          model: "gpt-4o",
-          max_tokens: 512,
-          messages: [
-            {
-              role: "user",
-              content: [
-                {
-                  type: "image_url",
-                  image_url: { url: fullImageUrl, detail: "high" },
-                },
-                { type: "text", text: personStage2Prompt(detected.category, x, y) },
-              ],
-            },
-          ],
-        });
-
-        const stage2Raw = stage2Response.choices[0].message.content ?? "";
-        console.log(`Stage-2 item ${detected.id} (${detected.category}) raw:`, stage2Raw);
-
-        const identified = JSON.parse(extractJSON(stage2Raw)) as IdentifiedItem;
-
-        const brand = identified.brand ?? "Unknown";
-        // Never allow an empty model — fall back to a category description
-        const model = (identified.model && identified.model.trim())
-          ? identified.model.trim()
-          : detected.category;
-        // Never allow confidence 0 — floor at 30
-        const confidence = Math.max(30, identified.confidence ?? 30);
-
-        return {
-          id: detected.id,
-          category: detected.category,
-          brand,
-          model,
-          year: identified.year,
-          confidence,
-          visualAnomalies: identified.visualAnomalies ?? [],
-          searchQuery: buildItemSearchQuery(brand, model),
-          x,
-          y,
-        };
-      } catch (err) {
-        console.error(`Stage-2 failed for item ${detected.id}:`, err);
-        // Return a partial item so the dot still appears
-        return {
-          id: detected.id,
-          category: detected.category,
-          brand: "Unknown",
-          model: detected.category,
-          confidence: 30,
-          visualAnomalies: [],
-          searchQuery: buildItemSearchQuery("Unknown", detected.category),
-          x,
-          y,
-        };
-      }
-    })
-  );
-
-  return { items: stage2Results, faces };
 }
 
 // ─── Route Handler ────────────────────────────────────────────────────────────
@@ -515,102 +334,105 @@ export async function POST(req: NextRequest) {
     const { data: imageData, mediaType } = parseBase64Image(image);
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-    // ── 2. Call GPT-4o (mode-specific logic) ─────────────────────────────────
+    // ── 2. Single GPT-4o call for all modes ───────────────────────────────────
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o",
+      max_tokens: 2048,
+      messages: [
+        { role: "system", content: SYSTEM_PROMPTS[typedMode] },
+        {
+          role: "user",
+          content: [
+            {
+              type: "image_url",
+              image_url: { url: `data:${mediaType};base64,${imageData}`, detail: "high" },
+            },
+            { type: "text", text: "Analyze this image and return the JSON as instructed." },
+          ],
+        },
+      ],
+    });
+
+    const rawText = response.choices[0].message.content ?? "";
+    console.log("Raw GPT-4o response:", rawText);
+    const cleanedText = extractJSON(rawText);
+
+    let claudeParsed: unknown;
+    try {
+      claudeParsed = JSON.parse(cleanedText);
+      console.log("Parsed result:", JSON.stringify(claudeParsed, null, 2));
+    } catch {
+      return NextResponse.json(
+        { error: "AI returned non-JSON response", raw: rawText },
+        { status: 502 }
+      );
+    }
+
+    // ── 3. Normalise to a flat array of items + extract faces / carRaw ────────
     let normalizedItems: ClaudeItem[] = [];
     let carRaw: ClaudeCarHigh | ClaudeCarLow | null = null;
     let faces: FaceRegion[] = [];
 
     if (typedMode === "person") {
-      // Two-stage pipeline: detect → crop → identify
-      const result = await runPersonPipeline(openai, imageData, mediaType);
-      normalizedItems = result.items;
-      faces = result.faces;
+      type PersonResponse = { items: ClaudeItem[]; faces?: FaceRegion[] };
+      if (Array.isArray(claudeParsed)) {
+        normalizedItems = claudeParsed as ClaudeItem[];
+      } else {
+        const personData = claudeParsed as PersonResponse;
+        normalizedItems = personData.items ?? [];
+        faces = personData.faces ?? [];
+      }
+      // Override searchQuery with our retail/resale helper
+      normalizedItems = normalizedItems.map((item) => ({
+        ...item,
+        searchQuery: buildItemSearchQuery(item.brand, item.model),
+      }));
+
+    } else if (typedMode === "car") {
+      // Handle toy/model car rejection
+      const maybeError = claudeParsed as { error?: string };
+      if (maybeError.error) {
+        return NextResponse.json({ error: maybeError.error }, { status: 422 });
+      }
+
+      const car = claudeParsed as ClaudeCarHigh | ClaudeCarLow;
+      carRaw = car;
+      const isHighConfidence = "brand" in car;
+      const brand = isHighConfidence
+        ? (car as ClaudeCarHigh).brand
+        : (car as ClaudeCarLow).candidates[0]?.brand ?? "Unknown";
+      const carModel = isHighConfidence
+        ? (car as ClaudeCarHigh).model
+        : (car as ClaudeCarLow).candidates[0]?.model ?? "Unknown";
+      const series = isHighConfidence ? (car as ClaudeCarHigh).series : undefined;
+      const possibleYears = isHighConfidence ? ((car as ClaudeCarHigh).possibleYears ?? []) : [];
+      const yearToken = possibleYears.length
+        ? possibleYears[Math.floor(possibleYears.length / 2)]
+        : "";
+      const seriesToken = series ? ` ${series}` : "";
+      const searchQuery = `${yearToken ? yearToken + " " : ""}${brand}${seriesToken} ${carModel} new price OR used price site:cars.com OR site:autotrader.com OR site:edmunds.com`;
+
+      normalizedItems = [{
+        id: 1,
+        category: "car",
+        brand,
+        model: carModel,
+        confidence: car.confidence,
+        visualAnomalies: [],
+        searchQuery,
+      }];
 
     } else {
-      // Car / item: single-shot as before
-      const response = await openai.chat.completions.create({
-        model: "gpt-4o",
-        max_tokens: 2048,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPTS[typedMode] },
-          {
-            role: "user",
-            content: [
-              {
-                type: "image_url",
-                image_url: { url: `data:${mediaType};base64,${imageData}`, detail: "high" },
-              },
-              { type: "text", text: "Analyze this image and return the JSON as instructed." },
-            ],
-          },
-        ],
-      });
-
-      const rawText = response.choices[0].message.content ?? "";
-      console.log("Raw GPT-4o text:", rawText);
-      const cleanedText = extractJSON(rawText);
-
-      let claudeParsed: unknown;
-      try {
-        claudeParsed = JSON.parse(cleanedText);
-        console.log("Claude parsed result:", JSON.stringify(claudeParsed, null, 2));
-      } catch {
-        return NextResponse.json(
-          { error: "AI returned non-JSON response", raw: rawText },
-          { status: 502 }
-        );
-      }
-
-      if (typedMode === "car") {
-        // Handle toy/model car rejection from GPT-4o
-        const maybeError = claudeParsed as { error?: string };
-        if (maybeError.error) {
-          return NextResponse.json({ error: maybeError.error }, { status: 422 });
-        }
-
-        const car = claudeParsed as ClaudeCarHigh | ClaudeCarLow;
-        carRaw = car;
-        const isHighConfidence = "brand" in car;
-        const brand = isHighConfidence
-          ? (car as ClaudeCarHigh).brand
-          : (car as ClaudeCarLow).candidates[0]?.brand ?? "Unknown";
-        const carModel = isHighConfidence
-          ? (car as ClaudeCarHigh).model
-          : (car as ClaudeCarLow).candidates[0]?.model ?? "Unknown";
-        const series = isHighConfidence ? (car as ClaudeCarHigh).series : undefined;
-        const possibleYears = isHighConfidence ? ((car as ClaudeCarHigh).possibleYears ?? []) : [];
-        // Use middle year of the production range for the most representative pricing
-        const yearToken = possibleYears.length
-          ? possibleYears[Math.floor(possibleYears.length / 2)]
-          : "";
-        const seriesToken = series ? ` ${series}` : "";
-        const searchQuery = `${yearToken ? yearToken + " " : ""}${brand}${seriesToken} ${carModel} new price OR used price site:cars.com OR site:autotrader.com OR site:edmunds.com`;
-
-        normalizedItems = [
-          {
-            id: 1,
-            category: "car",
-            brand,
-            model: carModel,
-            confidence: car.confidence,
-            visualAnomalies: [],
-            searchQuery,
-          },
-        ];
-      } else {
-        // item mode
-        const item = claudeParsed as ClaudeItem;
-        normalizedItems = [{
-          ...item,
-          id: 1,
-          searchQuery: buildItemSearchQuery(item.brand, item.model),
-        }];
-      }
+      // item mode
+      const item = claudeParsed as ClaudeItem;
+      normalizedItems = [{
+        ...item,
+        id: 1,
+        searchQuery: buildItemSearchQuery(item.brand, item.model),
+      }];
     }
 
-    // ── 3. Call Serper in parallel for every item ─────────────────────────────
-    // Car items use the automotive web-search endpoint (respects site: operators);
-    // all other items use the shopping endpoint.
+    // ── 4. Call Serper in parallel for every item ─────────────────────────────
     const allListings = await Promise.all(
       normalizedItems.map((item) =>
         item.category === "car"
@@ -619,7 +441,7 @@ export async function POST(req: NextRequest) {
       )
     );
 
-    // ── 4. Assemble enriched items ────────────────────────────────────────────
+    // ── 5. Assemble enriched items ────────────────────────────────────────────
     const enrichedItems: EnrichedItem[] = normalizedItems.map((item, i) => {
       const listings = allListings[i];
       const prices = extractPrices(listings);
@@ -643,23 +465,23 @@ export async function POST(req: NextRequest) {
       };
     });
 
-    // ── 5. Generate scanId and persist to KV (TTL = 24 h) ────────────────────
+    // ── 6. Persist to KV (TTL = 24 h) ────────────────────────────────────────
     const scanId = uuidv4();
     const fullRecord = {
       scanId,
       uuid,
       mode: typedMode,
       timestamp: Date.now(),
-      claudeRaw: carRaw ?? (typedMode === "person" ? normalizedItems : undefined),
+      claudeRaw: carRaw ?? claudeParsed,
       items: enrichedItems,
       faces,
     };
     await kv.set(`scan_${scanId}`, fullRecord, { ex: 86400 });
 
-    // ── 6. Calculate aggregate value ──────────────────────────────────────────
+    // ── 7. Calculate aggregate value ──────────────────────────────────────────
     const totalValue = enrichedItems.reduce((sum, item) => sum + item.maxPrice, 0);
 
-    // ── 7. Build blurred response for the frontend ────────────────────────────
+    // ── 8. Build blurred response for the frontend ────────────────────────────
     const blurredItems = enrichedItems.map((item) => ({
       id: item.id,
       category: "***",
