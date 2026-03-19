@@ -645,8 +645,17 @@ function PersonMode({ imageUrl, items, faces = [] }: { imageUrl: string; items: 
         {imgRect && items.map((item, i) => {
           const fallback = FALLBACK_POSITIONS[i] ?? { x: 20, y: 20 };
           const xPct = item.x ?? fallback.x;
-          // Guard: never render a dot in the upper face region (top 15% of image)
-          const yPct = Math.max(15, item.y ?? fallback.y);
+          let yPct  = item.y ?? fallback.y;
+          // Push dot below any face bounding box it overlaps
+          for (const face of faces) {
+            if (xPct >= face.x && xPct <= face.x + face.w &&
+                yPct >= face.y && yPct <= face.y + face.h) {
+              yPct = face.y + face.h + 3;
+              break;
+            }
+          }
+          // Absolute floor: never in the top 10% regardless of face data
+          yPct = Math.max(10, yPct);
           // Convert GPT-4o's % of original image → px offset within container
           const left = imgRect.left + (xPct / 100) * imgRect.w;
           const top  = imgRect.top  + (yPct / 100) * imgRect.h;

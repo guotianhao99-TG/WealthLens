@@ -102,7 +102,7 @@ Return ONLY a valid JSON object with this exact structure:
     {"x": 42, "y": 5, "w": 18, "h": 22}
   ]
 }
-For items: x and y are the estimated center of the item as a percentage of the image (0-100), where x=0 is left, x=100 is right, y=0 is top, y=100 is bottom.
+Return x and y as the exact center coordinates of each item as a percentage of the total image dimensions. Be as precise as possible. x=0 is left, x=100 is right, y=0 is top, y=100 is bottom.
 Never place a hotspot on a person's face. Only place hotspots on clothing, bags, shoes, accessories, watches, and jewelry.
 For faces: x and y are the top-left corner of the face bounding box as a percentage, w and h are the width and height as a percentage of the image dimensions.
 If no faces are detected, return an empty array for faces.
