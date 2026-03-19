@@ -112,9 +112,11 @@ For faces: x/y are the top-left corner; w/h are the size.
 Never place a hotspot on a person's face. Only detect clothing, bags, shoes, accessories, watches, and jewelry.
 Return ONLY valid JSON without any markdown formatting, code blocks, or preambles.`;
 
-// Stage-2: Identify a single cropped item
-function personStage2Prompt(category: string): string {
-  return `This is a cropped image of a single ${category}. Identify the brand and model precisely.
+// Stage-2: Identify a specific item in the full image by coordinate
+function personStage2Prompt(category: string, cx: number, cy: number): string {
+  return `Focus on the ${category} located at approximately x:${cx.toFixed(1)}%, y:${cy.toFixed(1)}% of this image.
+Identify the brand and model of ONLY this specific item.
+Look for logos, patterns, hardware, labels, or any distinctive features.
 Return ONLY valid JSON with this exact structure:
 {
   "brand": "Louis Vuitton",
@@ -124,10 +126,12 @@ Return ONLY valid JSON with this exact structure:
   "visualAnomalies": [
     { "description": "stitching pattern inconsistent", "riskWeight": 25 }
   ],
-  "searchQuery": "Louis Vuitton Neverfull MM new price buy 2024 site:nordstrom.com OR site:net-a-porter.com OR site:farfetch.com OR site:ssense.com"
+  "searchQuery": "Louis Vuitton Neverfull MM new retail price"
 }
-If the brand is not identifiable use "Unknown" for the brand field.
-If no visual anomalies are detected, return an empty array.
+Rules:
+- If the brand is truly unidentifiable, set brand to "Unknown" and describe what you see for model (e.g. "black leather crossbody bag" or "white low-top sneaker"). Never leave model empty.
+- Minimum confidence is 30. Never return confidence: 0.
+- If no visual anomalies are detected, return an empty array for visualAnomalies.
 Return ONLY valid JSON without any markdown formatting, code blocks, or preambles.`;
 }
 
@@ -405,16 +409,18 @@ async function runPersonPipeline(
 
   console.log(`Stage-1 detected ${detectedItems.length} items, ${faces.length} faces`);
 
-  // ── Stage 2: identify each item from its crop in parallel ─────────────────
+  // ── Stage 2: identify each item using the full image + coordinate focus ──────
+  // Sending the full original image (not a crop) gives GPT-4o full context
+  // for logos, patterns and surrounding context that crops often lose.
+  const fullImageUrl = `data:${mediaType};base64,${imageData}`;
+
   const stage2Results = await Promise.all(
     detectedItems.map(async (detected): Promise<ClaudeItem> => {
-      // Compute dot center from bbox center
+      // Dot sits at the bbox centre
       const x = detected.bbox.left + detected.bbox.width  / 2;
       const y = detected.bbox.top  + detected.bbox.height / 2;
 
       try {
-        const croppedBase64 = await cropImage(imageData, mediaType, detected.bbox);
-
         const stage2Response = await openai.chat.completions.create({
           model: "gpt-4o",
           max_tokens: 512,
@@ -424,12 +430,9 @@ async function runPersonPipeline(
               content: [
                 {
                   type: "image_url",
-                  image_url: {
-                    url: `data:image/jpeg;base64,${croppedBase64}`,
-                    detail: "high",
-                  },
+                  image_url: { url: fullImageUrl, detail: "high" },
                 },
-                { type: "text", text: personStage2Prompt(detected.category) },
+                { type: "text", text: personStage2Prompt(detected.category, x, y) },
               ],
             },
           ],
@@ -441,14 +444,20 @@ async function runPersonPipeline(
         const identified = JSON.parse(extractJSON(stage2Raw)) as IdentifiedItem;
 
         const brand = identified.brand ?? "Unknown";
-        const model = identified.model ?? "Unknown";
+        // Never allow an empty model — fall back to a category description
+        const model = (identified.model && identified.model.trim())
+          ? identified.model.trim()
+          : detected.category;
+        // Never allow confidence 0 — floor at 30
+        const confidence = Math.max(30, identified.confidence ?? 30);
+
         return {
           id: detected.id,
           category: detected.category,
           brand,
           model,
           year: identified.year,
-          confidence: identified.confidence ?? 70,
+          confidence,
           visualAnomalies: identified.visualAnomalies ?? [],
           searchQuery: buildItemSearchQuery(brand, model),
           x,
@@ -461,8 +470,8 @@ async function runPersonPipeline(
           id: detected.id,
           category: detected.category,
           brand: "Unknown",
-          model: "Unknown",
-          confidence: 50,
+          model: detected.category,
+          confidence: 30,
           visualAnomalies: [],
           searchQuery: buildItemSearchQuery("Unknown", detected.category),
           x,
