@@ -124,7 +124,7 @@ Return ONLY valid JSON with this exact structure:
   "visualAnomalies": [
     { "description": "stitching pattern inconsistent", "riskWeight": 25 }
   ],
-  "searchQuery": "Louis Vuitton Neverfull MM resale price 2024"
+  "searchQuery": "Louis Vuitton Neverfull MM new price buy 2024 site:nordstrom.com OR site:net-a-porter.com OR site:farfetch.com OR site:ssense.com"
 }
 If the brand is not identifiable use "Unknown" for the brand field.
 If no visual anomalies are detected, return an empty array.
@@ -171,10 +171,47 @@ Return ONLY valid JSON with this exact structure:
     {"description": "logo font spacing abnormal", "riskWeight": 25},
     {"description": "hardware color inconsistent", "riskWeight": 20}
   ],
-  "searchQuery": "Chanel Classic Flap Medium 2022 resale price"
+  "searchQuery": "Chanel Classic Flap Medium new price buy 2024 site:nordstrom.com OR site:net-a-porter.com OR site:farfetch.com OR site:ssense.com"
 }
 Return ONLY valid JSON without any markdown formatting, code blocks, or preambles.`,
 };
+
+// ─── Search query helpers ─────────────────────────────────────────────────────
+
+/**
+ * Brands that are discontinued or exist primarily on the vintage/secondhand
+ * market. Items from these brands will use a resale search query instead of
+ * a new-retail one. Extend this list as needed.
+ */
+const VINTAGE_RESALE_BRANDS = new Set([
+  "biba", "ossie clark", "halston", "bill blass", "geoffrey beene",
+  "courreges", "courrèges", "pierre cardin", "ungaro",
+  "gianni versace", "azzedine alaïa", "alaia",
+  "helmut lang vintage", "martin margiela vintage",
+]);
+
+/** Returns true when a brand is discontinued / primarily a resale brand. */
+function isVintageBrand(brand: string): boolean {
+  return VINTAGE_RESALE_BRANDS.has(brand.toLowerCase().trim());
+}
+
+/**
+ * Build the appropriate Serper search query for a fashion/goods item.
+ * - Active brands   → new retail query targeting major retail sites.
+ * - Unknown brand   → generic new-retail query.
+ * - Vintage/discontinued brands → resale query targeting secondhand sites.
+ */
+function buildItemSearchQuery(brand: string, model: string): string {
+  const b = (brand ?? "").trim();
+  const m = (model ?? "").trim();
+  if (!b || b === "Unknown") {
+    return `${m} buy new price 2024 site:nordstrom.com OR site:net-a-porter.com OR site:farfetch.com OR site:ssense.com`;
+  }
+  if (isVintageBrand(b)) {
+    return `${b} ${m} resale secondhand price site:vestiairecollective.com OR site:therealreal.com OR site:1stdibs.com`;
+  }
+  return `${b} ${m} new price buy 2024 site:nordstrom.com OR site:net-a-porter.com OR site:farfetch.com OR site:ssense.com`;
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -403,15 +440,17 @@ async function runPersonPipeline(
 
         const identified = JSON.parse(extractJSON(stage2Raw)) as IdentifiedItem;
 
+        const brand = identified.brand ?? "Unknown";
+        const model = identified.model ?? "Unknown";
         return {
           id: detected.id,
           category: detected.category,
-          brand: identified.brand ?? "Unknown",
-          model: identified.model ?? "Unknown",
+          brand,
+          model,
           year: identified.year,
           confidence: identified.confidence ?? 70,
           visualAnomalies: identified.visualAnomalies ?? [],
-          searchQuery: identified.searchQuery ?? `${identified.brand} ${identified.model} resale price`,
+          searchQuery: buildItemSearchQuery(brand, model),
           x,
           y,
         };
@@ -425,7 +464,7 @@ async function runPersonPipeline(
           model: "Unknown",
           confidence: 50,
           visualAnomalies: [],
-          searchQuery: `${detected.category} resale price`,
+          searchQuery: buildItemSearchQuery("Unknown", detected.category),
           x,
           y,
         };
@@ -552,7 +591,11 @@ export async function POST(req: NextRequest) {
       } else {
         // item mode
         const item = claudeParsed as ClaudeItem;
-        normalizedItems = [{ ...item, id: 1 }];
+        normalizedItems = [{
+          ...item,
+          id: 1,
+          searchQuery: buildItemSearchQuery(item.brand, item.model),
+        }];
       }
     }
 
