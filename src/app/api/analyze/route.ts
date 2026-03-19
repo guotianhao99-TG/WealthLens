@@ -22,12 +22,18 @@ interface DetectedItem {
   bbox: { top: number; left: number; width: number; height: number };
 }
 
-// Stage-2 identification result
-interface IdentifiedItem {
+// Stage-2 brand detection result
+interface BrandDetectionResult {
+  hasIdentifiableFeature: boolean;
   brand: string;
+  identifiedFeature: string;
+  confidence: number;
+}
+
+// Stage-3 model matching result
+interface ModelMatchResult {
   model: string;
   year?: string;
-  confidence: number;
   visualAnomalies?: VisualAnomaly[];
   searchQuery: string;
 }
@@ -94,44 +100,57 @@ interface EnrichedItem {
 
 // ─── System Prompts ───────────────────────────────────────────────────────────
 
-// Stage-1: Detection only — returns bbox per item + face regions
+// Stage-1: Detect all items + faces, return bboxes only
 const PERSON_STAGE1_PROMPT = `Identify all visible items in this image (clothing, bags, shoes, accessories, watches, jewelry).
 Also detect any human faces and return their bounding boxes.
 Return ONLY valid JSON with this exact structure:
 {
   "items": [
-    {
-      "id": 1,
-      "category": "bag",
-      "bbox": { "top": 20, "left": 30, "width": 15, "height": 20 }
-    }
+    { "id": 1, "category": "bag", "bbox": { "top": 20, "left": 30, "width": 15, "height": 20 } }
   ],
   "faces": [
     { "x": 42, "y": 5, "w": 18, "h": 22 }
   ]
 }
-All values are percentages of the image dimensions (0-100).
-For items: bbox.top and bbox.left are the top-left corner, bbox.width and bbox.height are the size.
-For faces: x and y are the top-left corner, w and h are the size.
-Never include a hotspot on a person's face. Only detect clothing, bags, shoes, accessories, watches, and jewelry.
+Bounding box values are percentages of image dimensions (0-100).
+For items: bbox.top/left are the top-left corner; bbox.width/height are the size.
+For faces: x/y are the top-left corner; w/h are the size.
+Never place a hotspot on a person's face. Only detect clothing, bags, shoes, accessories, watches, and jewelry.
 Return ONLY valid JSON without any markdown formatting, code blocks, or preambles.`;
 
-// Stage-2: Identify a single cropped item
+// Stage-2: Brand detection from cropped item image
 function personStage2Prompt(category: string): string {
-  return `This is a cropped image of a single ${category}. Identify the brand and model precisely.
+  return `Look for any logo, label, hardware, pattern, or distinctive feature on this ${category}.
 Return ONLY valid JSON with this exact structure:
 {
+  "hasIdentifiableFeature": true,
   "brand": "Louis Vuitton",
+  "identifiedFeature": "monogram canvas pattern",
+  "confidence": 85
+}
+If no identifiable brand feature exists, return:
+{
+  "hasIdentifiableFeature": false,
+  "brand": "Unknown",
+  "identifiedFeature": "",
+  "confidence": 0
+}
+Return ONLY valid JSON without any markdown formatting, code blocks, or preambles.`;
+}
+
+// Stage-3: Model matching from cropped item image, given a known brand
+function personStage3Prompt(brand: string, category: string): string {
+  return `This is a ${brand} ${category}. Based on the overall shape, size, hardware, and details, identify the specific model.
+Return ONLY valid JSON with this exact structure:
+{
   "model": "Neverfull MM",
   "year": "2022",
-  "confidence": 90,
   "visualAnomalies": [
     { "description": "stitching pattern inconsistent", "riskWeight": 25 }
   ],
   "searchQuery": "Louis Vuitton Neverfull MM resale price 2024"
 }
-If the brand is not identifiable use "Unknown" for the brand field.
-If no visual anomalies are detected, return an empty array.
+If no visual anomalies are detected, return an empty array for visualAnomalies.
 Return ONLY valid JSON without any markdown formatting, code blocks, or preambles.`;
 }
 
@@ -292,7 +311,7 @@ async function cropImage(
   return cropped.toString("base64");
 }
 
-// ─── Person mode — two-stage pipeline ────────────────────────────────────────
+// ─── Person mode — three-stage pipeline ──────────────────────────────────────
 
 async function runPersonPipeline(
   openai: OpenAI,
@@ -300,7 +319,7 @@ async function runPersonPipeline(
   mediaType: ImageMediaType
 ): Promise<{ items: ClaudeItem[]; faces: FaceRegion[] }> {
 
-  // ── Stage 1: detect items + faces ──────────────────────────────────────────
+  // ── Stage 1: detect all items + faces ──────────────────────────────────────
   const stage1Response = await openai.chat.completions.create({
     model: "gpt-4o",
     max_tokens: 1024,
@@ -338,30 +357,26 @@ async function runPersonPipeline(
 
   console.log(`Stage-1 detected ${detectedItems.length} items, ${faces.length} faces`);
 
-  // ── Stage 2: identify each item from its crop in parallel ─────────────────
-  const stage2Results = await Promise.all(
+  // ── Stages 2 & 3: run per-item pipeline in parallel ────────────────────────
+  const results = await Promise.all(
     detectedItems.map(async (detected): Promise<ClaudeItem> => {
-      // Compute dot center from bbox center
+      // Dot sits at the bbox centre
       const x = detected.bbox.left + detected.bbox.width  / 2;
       const y = detected.bbox.top  + detected.bbox.height / 2;
 
       try {
         const croppedBase64 = await cropImage(imageData, mediaType, detected.bbox);
+        const croppedUrl = `data:image/jpeg;base64,${croppedBase64}`;
 
+        // ── Stage 2: brand detection ──────────────────────────────────────────
         const stage2Response = await openai.chat.completions.create({
           model: "gpt-4o",
-          max_tokens: 512,
+          max_tokens: 256,
           messages: [
             {
               role: "user",
               content: [
-                {
-                  type: "image_url",
-                  image_url: {
-                    url: `data:image/jpeg;base64,${croppedBase64}`,
-                    detail: "high",
-                  },
-                },
+                { type: "image_url", image_url: { url: croppedUrl, detail: "high" } },
                 { type: "text", text: personStage2Prompt(detected.category) },
               ],
             },
@@ -369,25 +384,63 @@ async function runPersonPipeline(
         });
 
         const stage2Raw = stage2Response.choices[0].message.content ?? "";
-        console.log(`Stage-2 item ${detected.id} (${detected.category}) raw:`, stage2Raw);
+        console.log(`Stage-2 item ${detected.id} (${detected.category}):`, stage2Raw);
 
-        const identified = JSON.parse(extractJSON(stage2Raw)) as IdentifiedItem;
+        const brandResult = JSON.parse(extractJSON(stage2Raw)) as BrandDetectionResult;
 
+        // ── Stage 3: model matching ───────────────────────────────────────────
+        if (brandResult.hasIdentifiableFeature && brandResult.brand !== "Unknown") {
+          const stage3Response = await openai.chat.completions.create({
+            model: "gpt-4o",
+            max_tokens: 384,
+            messages: [
+              {
+                role: "user",
+                content: [
+                  { type: "image_url", image_url: { url: croppedUrl, detail: "high" } },
+                  { type: "text", text: personStage3Prompt(brandResult.brand, detected.category) },
+                ],
+              },
+            ],
+          });
+
+          const stage3Raw = stage3Response.choices[0].message.content ?? "";
+          console.log(`Stage-3 item ${detected.id}:`, stage3Raw);
+
+          const modelResult = JSON.parse(extractJSON(stage3Raw)) as ModelMatchResult;
+
+          return {
+            id: detected.id,
+            category: detected.category,
+            brand: brandResult.brand,
+            model: modelResult.model ?? "Unknown",
+            year: modelResult.year,
+            confidence: brandResult.confidence,
+            visualAnomalies: modelResult.visualAnomalies ?? [],
+            searchQuery: modelResult.searchQuery ??
+              `${brandResult.brand} ${modelResult.model} resale price`,
+            x,
+            y,
+          };
+        }
+
+        // No identifiable brand — skip stage 3, build a descriptive search query
+        const featureHint = brandResult.identifiedFeature
+          ? ` ${brandResult.identifiedFeature}` : "";
         return {
           id: detected.id,
           category: detected.category,
-          brand: identified.brand ?? "Unknown",
-          model: identified.model ?? "Unknown",
-          year: identified.year,
-          confidence: identified.confidence ?? 70,
-          visualAnomalies: identified.visualAnomalies ?? [],
-          searchQuery: identified.searchQuery ?? `${identified.brand} ${identified.model} resale price`,
+          brand: "Unknown",
+          model: "Similar style",
+          confidence: 40,
+          visualAnomalies: [],
+          searchQuery: `${detected.category}${featureHint} similar style price`,
           x,
           y,
         };
+
       } catch (err) {
-        console.error(`Stage-2 failed for item ${detected.id}:`, err);
-        // Return a partial item so the dot still appears
+        console.error(`Pipeline failed for item ${detected.id}:`, err);
         return {
           id: detected.id,
           category: detected.category,
@@ -403,7 +456,7 @@ async function runPersonPipeline(
     })
   );
 
-  return { items: stage2Results, faces };
+  return { items: results, faces };
 }
 
 // ─── Route Handler ────────────────────────────────────────────────────────────
@@ -443,7 +496,7 @@ export async function POST(req: NextRequest) {
     let faces: FaceRegion[] = [];
 
     if (typedMode === "person") {
-      // Two-stage pipeline: detect → crop → identify
+      // Three-stage pipeline: detect → brand → model
       const result = await runPersonPipeline(openai, imageData, mediaType);
       normalizedItems = result.items;
       faces = result.faces;

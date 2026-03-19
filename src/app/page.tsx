@@ -107,7 +107,7 @@ interface UnlockData {
 const GOLD = "#C9A84C";
 
 const LOADING_MESSAGES = [
-  "Scanning luxury items...",
+  "Scanning items...",
   "Checking market prices...",
   "Calculating total value...",
   "Almost ready...",
