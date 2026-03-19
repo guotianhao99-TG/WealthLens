@@ -139,26 +139,15 @@ function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
-async function compressToBase64(file: File): Promise<string> {
+async function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
-    const img = new window.Image();
-    const url = URL.createObjectURL(file);
-    img.onload = () => {
-      const MAX = 1600;
-      let { width, height } = img;
-      if (width > MAX || height > MAX) {
-        if (width >= height) { height = Math.round((height * MAX) / width); width = MAX; }
-        else                 { width = Math.round((width * MAX) / height); height = MAX; }
-      }
-      const canvas = document.createElement("canvas");
-      canvas.width = width; canvas.height = height;
-      const ctx = canvas.getContext("2d")!;
-      ctx.drawImage(img, 0, 0, width, height);
-      URL.revokeObjectURL(url);
-      resolve(canvas.toDataURL("image/jpeg", 0.92).split(",")[1]);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      resolve(dataUrl.split(",")[1]);
     };
-    img.onerror = reject;
-    img.src = url;
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
   });
 }
 
@@ -240,7 +229,7 @@ function HomeState({ mode, onModeChange, onImageSelected, error }: HomeProps) {
         <span className="text-5xl">📷</span>
         <p className="text-white font-medium text-center">Drop a photo here</p>
         <p className="text-zinc-500 text-sm text-center">or click to browse</p>
-        <p className="text-zinc-600 text-xs text-center">JPG, PNG, WEBP — auto-compressed to 800px</p>
+        <p className="text-zinc-600 text-xs text-center">JPG, PNG, WEBP</p>
         <input
           ref={fileRef}
           type="file"
@@ -623,23 +612,6 @@ function PersonMode({ imageUrl, items, faces = [] }: { imageUrl: string; items: 
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src={imageUrl} alt="Scan" className="w-full object-cover" style={{ maxHeight: 360 }} />
 
-        {/* Face blur overlays */}
-        {faces.map((face, i) => (
-          <div
-            key={i}
-            className="absolute pointer-events-none"
-            style={{
-              left: `${face.x}%`,
-              top: `${face.y}%`,
-              width: `${face.w}%`,
-              height: `${face.h}%`,
-              backdropFilter: "blur(24px)",
-              WebkitBackdropFilter: "blur(24px)",
-              borderRadius: "50%",
-            }}
-          />
-        ))}
-
         {/* Dismiss tooltip when clicking image background */}
         {activeId !== null && (
           <div className="absolute inset-0 z-0" onClick={() => setActiveId(null)} />
@@ -918,7 +890,7 @@ export default function WealthLens() {
     setAppState("loading");
 
     try {
-      const base64 = await compressToBase64(file);
+      const base64 = await fileToBase64(file);
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
