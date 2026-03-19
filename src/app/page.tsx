@@ -610,7 +610,7 @@ function PersonMode({ imageUrl, items, faces = [] }: { imageUrl: string; items: 
       {/* Image with interactive hotspot dots */}
       <div className="relative w-full rounded-2xl overflow-hidden">
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={imageUrl} alt="Scan" className="w-full object-cover" style={{ maxHeight: 360 }} />
+        <img src={imageUrl} alt="Scan" className="w-full block" style={{ height: "auto" }} />
 
         {/* Dismiss tooltip when clicking image background */}
         {activeId !== null && (
