@@ -620,7 +620,8 @@ function PersonMode({ imageUrl, items, faces = [] }: { imageUrl: string; items: 
         {items.map((item, i) => {
           const fallback = FALLBACK_POSITIONS[i] ?? { x: 20, y: 20 };
           const x = item.x ?? fallback.x;
-          const y = item.y ?? fallback.y;
+          // Guard: never render a dot in the upper face region (top 15% of image)
+          const y = Math.max(15, item.y ?? fallback.y);
           const isActive = activeId === item.id;
           // Flip tooltip to stay inside image bounds
           const tipLeft = x > 55;
