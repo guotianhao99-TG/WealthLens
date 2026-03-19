@@ -67,8 +67,8 @@ interface EnrichedItem {
 
 const SYSTEM_PROMPTS: Record<Mode, string> = {
   person: `You are a luxury fashion and goods expert.
-Analyze this image and identify every visible branded item worn or carried by any person in the photo.
-Ignore ALL background objects, focus only on items on people.
+Analyze this image and identify every visible branded luxury item in the photo including bags, shoes, watches, jewelry, and clothing.
+Focus on the items themselves, not who is wearing them.
 Only identify what is clearly visible, do not guess hidden items.
 Return ONLY a valid JSON array with this exact structure:
 [{
