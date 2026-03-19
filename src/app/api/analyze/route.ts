@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { kv } from "@vercel/kv";
 import { v4 as uuidv4 } from "uuid";
+import sharp from "sharp";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -12,6 +13,23 @@ type ImageMediaType = "image/jpeg" | "image/png" | "image/gif" | "image/webp";
 interface VisualAnomaly {
   description: string;
   riskWeight: number;
+}
+
+// Stage-1 detection result
+interface DetectedItem {
+  id: number;
+  category: string;
+  bbox: { top: number; left: number; width: number; height: number };
+}
+
+// Stage-2 identification result
+interface IdentifiedItem {
+  brand: string;
+  model: string;
+  year?: string;
+  confidence: number;
+  visualAnomalies?: VisualAnomaly[];
+  searchQuery: string;
 }
 
 interface ClaudeItem {
@@ -76,38 +94,48 @@ interface EnrichedItem {
 
 // ─── System Prompts ───────────────────────────────────────────────────────────
 
-const SYSTEM_PROMPTS: Record<Mode, string> = {
-  person: `You are a fashion and goods expert.
-Analyze this image and identify every visible item in the photo including clothing, shoes, bags, accessories, watches, and jewelry regardless of brand or price point.
-Focus on the items themselves, not who is wearing them.
-If the brand is not identifiable, use "Unknown" for the brand field.
-Only identify what is clearly visible, do not guess hidden items.
+// Stage-1: Detection only — returns bbox per item + face regions
+const PERSON_STAGE1_PROMPT = `Identify all visible items in this image (clothing, bags, shoes, accessories, watches, jewelry).
 Also detect any human faces and return their bounding boxes.
-Return ONLY a valid JSON object with this exact structure:
+Return ONLY valid JSON with this exact structure:
 {
-  "items": [{
-    "id": 1,
-    "category": "bag",
-    "brand": "Louis Vuitton",
-    "model": "Neverfull MM",
-    "confidence": 90,
-    "visualAnomalies": [
-      {"description": "stitching pattern inconsistent", "riskWeight": 25}
-    ],
-    "searchQuery": "Louis Vuitton Neverfull MM resale price 2024",
-    "x": 35,
-    "y": 60
-  }],
+  "items": [
+    {
+      "id": 1,
+      "category": "bag",
+      "bbox": { "top": 20, "left": 30, "width": 15, "height": 20 }
+    }
+  ],
   "faces": [
-    {"x": 42, "y": 5, "w": 18, "h": 22}
+    { "x": 42, "y": 5, "w": 18, "h": 22 }
   ]
 }
-Return x and y as the exact center coordinates of each item as a percentage of the total image dimensions. Be as precise as possible. x=0 is left, x=100 is right, y=0 is top, y=100 is bottom.
-Never place a hotspot on a person's face. Only place hotspots on clothing, bags, shoes, accessories, watches, and jewelry.
-For faces: x and y are the top-left corner of the face bounding box as a percentage, w and h are the width and height as a percentage of the image dimensions.
-If no faces are detected, return an empty array for faces.
-Return ONLY valid JSON without any markdown formatting, code blocks, or preambles.`,
+All values are percentages of the image dimensions (0-100).
+For items: bbox.top and bbox.left are the top-left corner, bbox.width and bbox.height are the size.
+For faces: x and y are the top-left corner, w and h are the size.
+Never include a hotspot on a person's face. Only detect clothing, bags, shoes, accessories, watches, and jewelry.
+Return ONLY valid JSON without any markdown formatting, code blocks, or preambles.`;
 
+// Stage-2: Identify a single cropped item
+function personStage2Prompt(category: string): string {
+  return `This is a cropped image of a single ${category}. Identify the brand and model precisely.
+Return ONLY valid JSON with this exact structure:
+{
+  "brand": "Louis Vuitton",
+  "model": "Neverfull MM",
+  "year": "2022",
+  "confidence": 90,
+  "visualAnomalies": [
+    { "description": "stitching pattern inconsistent", "riskWeight": 25 }
+  ],
+  "searchQuery": "Louis Vuitton Neverfull MM resale price 2024"
+}
+If the brand is not identifiable use "Unknown" for the brand field.
+If no visual anomalies are detected, return an empty array.
+Return ONLY valid JSON without any markdown formatting, code blocks, or preambles.`;
+}
+
+const SYSTEM_PROMPTS: Record<Exclude<Mode, "person">, string> = {
   car: `You are an automotive expert.
 Analyze this image and identify the vehicle.
 Do NOT guess the exact year. List all possible production years for this model.
@@ -164,7 +192,6 @@ function parseBase64Image(raw: string): { data: string; mediaType: ImageMediaTyp
       data: dataUrlMatch[2],
     };
   }
-  // Detect from first bytes of raw base64
   let mediaType: ImageMediaType = "image/jpeg";
   if (raw.startsWith("iVBORw0KGgo")) mediaType = "image/png";
   else if (raw.startsWith("R0lGODlh")) mediaType = "image/gif";
@@ -187,7 +214,6 @@ function toRiskLevel(score: number): "low" | "medium" | "high" {
 /** Format a dollar total as an approximate blurred string, e.g. "$15,000+". */
 function formatTotalBlurred(value: number): string {
   if (value <= 0) return "N/A";
-  // Round down to the nearest 100 to avoid false precision
   const floored = Math.floor(value / 100) * 100;
   return `$${floored.toLocaleString("en-US")}+`;
 }
@@ -223,26 +249,161 @@ async function fetchSerperListings(query: string): Promise<SerperListing[]> {
   }
 }
 
-// Extract JSON from Claude response - handle markdown code blocks and extra text
+// Extract JSON from GPT response — handle markdown code blocks and extra text
 function extractJSON(text: string): string {
-  // Remove markdown code blocks
-  text = text.replace(/```json\n?/g, '').replace(/```\n?/g, '');
-
-  // Try to find JSON array or object
+  text = text.replace(/```json\n?/g, "").replace(/```\n?/g, "");
   const arrayMatch = text.match(/\[[\s\S]*\]/);
   const objectMatch = text.match(/\{[\s\S]*\}/);
-
-  // Return whichever outermost structure appears first in the text.
-  // This prevents the array regex from matching a nested array (e.g.
-  // visualAnomalies) inside a top-level object, which would cause the
-  // object's fields to be lost and its array indices spread as "0", "1", etc.
   if (arrayMatch && objectMatch) {
     return arrayMatch.index! < objectMatch.index! ? arrayMatch[0] : objectMatch[0];
   }
   if (arrayMatch) return arrayMatch[0];
   if (objectMatch) return objectMatch[0];
-
   return text.trim();
+}
+
+/**
+ * Crop a region out of a base64-encoded image using sharp.
+ * bbox values are percentages of image dimensions (0-100).
+ * Returns a base64-encoded JPEG of the cropped region.
+ */
+async function cropImage(
+  base64Data: string,
+  mediaType: ImageMediaType,
+  bbox: { top: number; left: number; width: number; height: number }
+): Promise<string> {
+  const buffer = Buffer.from(base64Data, "base64");
+  const img = sharp(buffer);
+  const meta = await img.metadata();
+  const imgW = meta.width ?? 800;
+  const imgH = meta.height ?? 800;
+
+  // Clamp to image bounds
+  const left   = Math.max(0, Math.round((bbox.left   / 100) * imgW));
+  const top    = Math.max(0, Math.round((bbox.top    / 100) * imgH));
+  const width  = Math.min(imgW - left, Math.max(1, Math.round((bbox.width  / 100) * imgW)));
+  const height = Math.min(imgH - top,  Math.max(1, Math.round((bbox.height / 100) * imgH)));
+
+  const cropped = await img
+    .extract({ left, top, width, height })
+    .jpeg({ quality: 90 })
+    .toBuffer();
+
+  return cropped.toString("base64");
+}
+
+// ─── Person mode — two-stage pipeline ────────────────────────────────────────
+
+async function runPersonPipeline(
+  openai: OpenAI,
+  imageData: string,
+  mediaType: ImageMediaType
+): Promise<{ items: ClaudeItem[]; faces: FaceRegion[] }> {
+
+  // ── Stage 1: detect items + faces ──────────────────────────────────────────
+  const stage1Response = await openai.chat.completions.create({
+    model: "gpt-4o",
+    max_tokens: 1024,
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "image_url",
+            image_url: { url: `data:${mediaType};base64,${imageData}`, detail: "high" },
+          },
+          { type: "text", text: PERSON_STAGE1_PROMPT },
+        ],
+      },
+    ],
+  });
+
+  const stage1Raw = stage1Response.choices[0].message.content ?? "";
+  console.log("Stage-1 raw:", stage1Raw);
+
+  let detectedItems: DetectedItem[] = [];
+  let faces: FaceRegion[] = [];
+
+  try {
+    const parsed = JSON.parse(extractJSON(stage1Raw)) as {
+      items?: DetectedItem[];
+      faces?: FaceRegion[];
+    };
+    detectedItems = parsed.items ?? [];
+    faces = parsed.faces ?? [];
+  } catch {
+    console.error("Stage-1 JSON parse failed:", stage1Raw);
+    return { items: [], faces: [] };
+  }
+
+  console.log(`Stage-1 detected ${detectedItems.length} items, ${faces.length} faces`);
+
+  // ── Stage 2: identify each item from its crop in parallel ─────────────────
+  const stage2Results = await Promise.all(
+    detectedItems.map(async (detected): Promise<ClaudeItem> => {
+      // Compute dot center from bbox center
+      const x = detected.bbox.left + detected.bbox.width  / 2;
+      const y = detected.bbox.top  + detected.bbox.height / 2;
+
+      try {
+        const croppedBase64 = await cropImage(imageData, mediaType, detected.bbox);
+
+        const stage2Response = await openai.chat.completions.create({
+          model: "gpt-4o",
+          max_tokens: 512,
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "image_url",
+                  image_url: {
+                    url: `data:image/jpeg;base64,${croppedBase64}`,
+                    detail: "high",
+                  },
+                },
+                { type: "text", text: personStage2Prompt(detected.category) },
+              ],
+            },
+          ],
+        });
+
+        const stage2Raw = stage2Response.choices[0].message.content ?? "";
+        console.log(`Stage-2 item ${detected.id} (${detected.category}) raw:`, stage2Raw);
+
+        const identified = JSON.parse(extractJSON(stage2Raw)) as IdentifiedItem;
+
+        return {
+          id: detected.id,
+          category: detected.category,
+          brand: identified.brand ?? "Unknown",
+          model: identified.model ?? "Unknown",
+          year: identified.year,
+          confidence: identified.confidence ?? 70,
+          visualAnomalies: identified.visualAnomalies ?? [],
+          searchQuery: identified.searchQuery ?? `${identified.brand} ${identified.model} resale price`,
+          x,
+          y,
+        };
+      } catch (err) {
+        console.error(`Stage-2 failed for item ${detected.id}:`, err);
+        // Return a partial item so the dot still appears
+        return {
+          id: detected.id,
+          category: detected.category,
+          brand: "Unknown",
+          model: "Unknown",
+          confidence: 50,
+          visualAnomalies: [],
+          searchQuery: `${detected.category} resale price`,
+          x,
+          y,
+        };
+      }
+    })
+  );
+
+  return { items: stage2Results, faces };
 }
 
 // ─── Route Handler ────────────────────────────────────────────────────────────
@@ -273,104 +434,91 @@ export async function POST(req: NextRequest) {
     }
 
     const typedMode = mode as Mode;
-
-    // ── 2. Call GPT-5.4 API with the image ───────────────────────────────────
     const { data: imageData, mediaType } = parseBase64Image(image);
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o",
-      max_tokens: 2048,
-      messages: [
-        {
-          role: "system",
-          content: SYSTEM_PROMPTS[typedMode],
-        },
-        {
-          role: "user",
-          content: [
-            {
-              type: "image_url",
-              image_url: {
-                url: `data:${mediaType};base64,${imageData}`,
-                detail: "high",
-              },
-            },
-            {
-              type: "text",
-              text: "Analyze this image and return the JSON as instructed.",
-            },
-          ],
-        },
-      ],
-    });
-
-    // ── 3. Parse GPT-5.4's JSON response ─────────────────────────────────────
-    const rawText = response.choices[0].message.content || "";
-    console.log("Raw GPT-4o text:", rawText);
-    const cleanedText = extractJSON(rawText);
-
-    let claudeParsed: unknown;
-    try {
-      claudeParsed = JSON.parse(cleanedText);
-      console.log("Claude parsed result:", JSON.stringify(claudeParsed, null, 2));
-    } catch {
-      return NextResponse.json(
-        { error: "AI returned non-JSON response", raw: rawText },
-        { status: 502 }
-      );
-    }
-
-    // ── 4. Normalise to a flat array of items + extract searchQueries ─────────
-    let normalizedItems: ClaudeItem[];
+    // ── 2. Call GPT-4o (mode-specific logic) ─────────────────────────────────
+    let normalizedItems: ClaudeItem[] = [];
     let carRaw: ClaudeCarHigh | ClaudeCarLow | null = null;
     let faces: FaceRegion[] = [];
 
-    if (typedMode === "car") {
-      const car = claudeParsed as ClaudeCarHigh | ClaudeCarLow;
-      carRaw = car;
-      const isHighConfidence = "brand" in car;
-      const brand = isHighConfidence
-        ? (car as ClaudeCarHigh).brand
-        : (car as ClaudeCarLow).candidates[0]?.brand ?? "Unknown";
-      const carModel = isHighConfidence
-        ? (car as ClaudeCarHigh).model
-        : (car as ClaudeCarLow).candidates[0]?.model ?? "Unknown";
-      const series = isHighConfidence ? (car as ClaudeCarHigh).series : undefined;
+    if (typedMode === "person") {
+      // Two-stage pipeline: detect → crop → identify
+      const result = await runPersonPipeline(openai, imageData, mediaType);
+      normalizedItems = result.items;
+      faces = result.faces;
 
-      normalizedItems = [
-        {
-          id: 1,
-          category: "car",
-          brand,
-          model: carModel,
-          confidence: car.confidence,
-          visualAnomalies: [],
-          searchQuery: `${brand}${series ? " " + series : ""} ${carModel} market value resale price`,
-        },
-      ];
-    } else if (typedMode === "item") {
-      const item = claudeParsed as ClaudeItem;
-      normalizedItems = [{ ...item, id: 1 }];
     } else {
-      // person — GPT-4o returns { items: [...], faces: [...] }
-      // Fall back to plain array for backward compatibility
-      type PersonResponse = { items: ClaudeItem[]; faces?: FaceRegion[] };
-      if (Array.isArray(claudeParsed)) {
-        normalizedItems = claudeParsed as ClaudeItem[];
+      // Car / item: single-shot as before
+      const response = await openai.chat.completions.create({
+        model: "gpt-4o",
+        max_tokens: 2048,
+        messages: [
+          { role: "system", content: SYSTEM_PROMPTS[typedMode] },
+          {
+            role: "user",
+            content: [
+              {
+                type: "image_url",
+                image_url: { url: `data:${mediaType};base64,${imageData}`, detail: "high" },
+              },
+              { type: "text", text: "Analyze this image and return the JSON as instructed." },
+            ],
+          },
+        ],
+      });
+
+      const rawText = response.choices[0].message.content ?? "";
+      console.log("Raw GPT-4o text:", rawText);
+      const cleanedText = extractJSON(rawText);
+
+      let claudeParsed: unknown;
+      try {
+        claudeParsed = JSON.parse(cleanedText);
+        console.log("Claude parsed result:", JSON.stringify(claudeParsed, null, 2));
+      } catch {
+        return NextResponse.json(
+          { error: "AI returned non-JSON response", raw: rawText },
+          { status: 502 }
+        );
+      }
+
+      if (typedMode === "car") {
+        const car = claudeParsed as ClaudeCarHigh | ClaudeCarLow;
+        carRaw = car;
+        const isHighConfidence = "brand" in car;
+        const brand = isHighConfidence
+          ? (car as ClaudeCarHigh).brand
+          : (car as ClaudeCarLow).candidates[0]?.brand ?? "Unknown";
+        const carModel = isHighConfidence
+          ? (car as ClaudeCarHigh).model
+          : (car as ClaudeCarLow).candidates[0]?.model ?? "Unknown";
+        const series = isHighConfidence ? (car as ClaudeCarHigh).series : undefined;
+
+        normalizedItems = [
+          {
+            id: 1,
+            category: "car",
+            brand,
+            model: carModel,
+            confidence: car.confidence,
+            visualAnomalies: [],
+            searchQuery: `${brand}${series ? " " + series : ""} ${carModel} market value resale price`,
+          },
+        ];
       } else {
-        const personData = claudeParsed as PersonResponse;
-        normalizedItems = personData.items ?? [];
-        faces = personData.faces ?? [];
+        // item mode
+        const item = claudeParsed as ClaudeItem;
+        normalizedItems = [{ ...item, id: 1 }];
       }
     }
 
-    // ── 5. Call Serper in parallel for every item ─────────────────────────────
+    // ── 3. Call Serper in parallel for every item ─────────────────────────────
     const allListings = await Promise.all(
       normalizedItems.map((item) => fetchSerperListings(item.searchQuery))
     );
 
-    // ── 6. Assemble enriched items ────────────────────────────────────────────
+    // ── 4. Assemble enriched items ────────────────────────────────────────────
     const enrichedItems: EnrichedItem[] = normalizedItems.map((item, i) => {
       const listings = allListings[i];
       const prices = extractPrices(listings);
@@ -394,27 +542,23 @@ export async function POST(req: NextRequest) {
       };
     });
 
-    // ── 7. Generate scanId ────────────────────────────────────────────────────
+    // ── 5. Generate scanId and persist to KV (TTL = 24 h) ────────────────────
     const scanId = uuidv4();
-
-    // ── 8. Persist full record in Vercel KV (TTL = 24 h) ─────────────────────
     const fullRecord = {
       scanId,
       uuid,
       mode: typedMode,
       timestamp: Date.now(),
-      claudeRaw: carRaw ?? claudeParsed,
+      claudeRaw: carRaw ?? (typedMode === "person" ? normalizedItems : undefined),
       items: enrichedItems,
       faces,
     };
     await kv.set(`scan_${scanId}`, fullRecord, { ex: 86400 });
 
-    // ── 9. Calculate aggregate risk score ─────────────────────────────────────
-    // (Each item already has its own riskScore computed above.)
-    // The totalValue is the sum of each item's highest observed listing price.
+    // ── 6. Calculate aggregate value ──────────────────────────────────────────
     const totalValue = enrichedItems.reduce((sum, item) => sum + item.maxPrice, 0);
 
-    // ── 10. Build blurred response for the frontend ───────────────────────────
+    // ── 7. Build blurred response for the frontend ────────────────────────────
     const blurredItems = enrichedItems.map((item) => ({
       id: item.id,
       category: "***",
@@ -423,7 +567,7 @@ export async function POST(req: NextRequest) {
       priceRange: "*** - ***",
       riskScore: item.riskScore,
       riskLevel: item.riskLevel,
-      listings: item.listings.map((l) => ({
+      listings: item.listings.map(() => ({
         title: "***",
         price: "***",
         thumbnail: "blurred",
