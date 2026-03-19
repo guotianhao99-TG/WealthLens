@@ -256,7 +256,7 @@ export async function POST(req: NextRequest) {
 
     const response = await openai.chat.completions.create({
       model: "gpt-5.4",
-      max_tokens: 1000,
+      max_tokens: 2048,
       messages: [
         {
           role: "system",
