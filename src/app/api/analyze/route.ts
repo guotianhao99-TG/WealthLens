@@ -42,6 +42,13 @@ interface ClaudeCarLow {
   limitingFactors?: string[];
 }
 
+interface FaceRegion {
+  x: number; // % from left edge
+  y: number; // % from top edge
+  w: number; // % of image width
+  h: number; // % of image height
+}
+
 interface SerperListing {
   title: string;
   price: string;
@@ -75,21 +82,29 @@ Analyze this image and identify every visible item in the photo including clothi
 Focus on the items themselves, not who is wearing them.
 If the brand is not identifiable, use "Unknown" for the brand field.
 Only identify what is clearly visible, do not guess hidden items.
-Return ONLY a valid JSON array with this exact structure:
-[{
-  "id": 1,
-  "category": "bag",
-  "brand": "Louis Vuitton",
-  "model": "Neverfull MM",
-  "confidence": 90,
-  "visualAnomalies": [
-    {"description": "stitching pattern inconsistent", "riskWeight": 25}
-  ],
-  "searchQuery": "Louis Vuitton Neverfull MM resale price 2024",
-  "x": 35,
-  "y": 60
-}]
-x and y are the estimated percentage position (0-100) of the item's center within the image, where x=0 is the left edge, x=100 is the right edge, y=0 is the top edge, y=100 is the bottom edge.
+Also detect any human faces and return their bounding boxes.
+Return ONLY a valid JSON object with this exact structure:
+{
+  "items": [{
+    "id": 1,
+    "category": "bag",
+    "brand": "Louis Vuitton",
+    "model": "Neverfull MM",
+    "confidence": 90,
+    "visualAnomalies": [
+      {"description": "stitching pattern inconsistent", "riskWeight": 25}
+    ],
+    "searchQuery": "Louis Vuitton Neverfull MM resale price 2024",
+    "x": 35,
+    "y": 60
+  }],
+  "faces": [
+    {"x": 42, "y": 5, "w": 18, "h": 22}
+  ]
+}
+For items: x and y are the estimated center of the item as a percentage of the image (0-100), where x=0 is left, x=100 is right, y=0 is top, y=100 is bottom.
+For faces: x and y are the top-left corner of the face bounding box as a percentage, w and h are the width and height as a percentage of the image dimensions.
+If no faces are detected, return an empty array for faces.
 Return ONLY valid JSON without any markdown formatting, code blocks, or preambles.`,
 
   car: `You are an automotive expert.
@@ -308,6 +323,7 @@ export async function POST(req: NextRequest) {
     // ── 4. Normalise to a flat array of items + extract searchQueries ─────────
     let normalizedItems: ClaudeItem[];
     let carRaw: ClaudeCarHigh | ClaudeCarLow | null = null;
+    let faces: FaceRegion[] = [];
 
     if (typedMode === "car") {
       const car = claudeParsed as ClaudeCarHigh | ClaudeCarLow;
@@ -336,8 +352,16 @@ export async function POST(req: NextRequest) {
       const item = claudeParsed as ClaudeItem;
       normalizedItems = [{ ...item, id: 1 }];
     } else {
-      // person — GPT-4o returns an array
-      normalizedItems = claudeParsed as ClaudeItem[];
+      // person — GPT-4o returns { items: [...], faces: [...] }
+      // Fall back to plain array for backward compatibility
+      type PersonResponse = { items: ClaudeItem[]; faces?: FaceRegion[] };
+      if (Array.isArray(claudeParsed)) {
+        normalizedItems = claudeParsed as ClaudeItem[];
+      } else {
+        const personData = claudeParsed as PersonResponse;
+        normalizedItems = personData.items ?? [];
+        faces = personData.faces ?? [];
+      }
     }
 
     // ── 5. Call Serper in parallel for every item ─────────────────────────────
@@ -380,6 +404,7 @@ export async function POST(req: NextRequest) {
       timestamp: Date.now(),
       claudeRaw: carRaw ?? claudeParsed,
       items: enrichedItems,
+      faces,
     };
     await kv.set(`scan_${scanId}`, fullRecord, { ex: 86400 });
 
@@ -410,6 +435,7 @@ export async function POST(req: NextRequest) {
       itemCount: enrichedItems.length,
       totalValueBlurred: formatTotalBlurred(totalValue),
       items: blurredItems,
+      faces,
     });
   } catch (error) {
     console.error("[/api/analyze]", error);

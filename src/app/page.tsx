@@ -62,11 +62,19 @@ interface BlurredItem {
   listings: Listing[];
 }
 
+interface FaceRegion {
+  x: number; // % from left edge
+  y: number; // % from top edge
+  w: number; // % of image width
+  h: number; // % of image height
+}
+
 interface AnalyzeResponse {
   scanId: string;
   itemCount: number;
   totalValueBlurred: string;
   items: BlurredItem[];
+  faces?: FaceRegion[];
 }
 
 interface CarHigh {
@@ -91,6 +99,7 @@ interface UnlockData {
   timestamp: number;
   claudeRaw: unknown;
   items: FullItem[];
+  faces?: FaceRegion[];
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -602,7 +611,7 @@ const FALLBACK_POSITIONS = [
   { x: 15, y: 48 }, { x: 85, y: 48 }, { x: 50, y: 78 },
 ];
 
-function PersonMode({ imageUrl, items }: { imageUrl: string; items: FullItem[] }) {
+function PersonMode({ imageUrl, items, faces = [] }: { imageUrl: string; items: FullItem[]; faces?: FaceRegion[] }) {
   const [activeId, setActiveId] = useState<number | null>(null);
   const totalMin = items.reduce((s, i) => s + i.minPrice, 0);
   const totalMax = items.reduce((s, i) => s + i.maxPrice, 0);
@@ -613,6 +622,23 @@ function PersonMode({ imageUrl, items }: { imageUrl: string; items: FullItem[] }
       <div className="relative w-full rounded-2xl overflow-hidden">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src={imageUrl} alt="Scan" className="w-full object-cover" style={{ maxHeight: 360 }} />
+
+        {/* Face blur overlays */}
+        {faces.map((face, i) => (
+          <div
+            key={i}
+            className="absolute pointer-events-none"
+            style={{
+              left: `${face.x}%`,
+              top: `${face.y}%`,
+              width: `${face.w}%`,
+              height: `${face.h}%`,
+              backdropFilter: "blur(24px)",
+              WebkitBackdropFilter: "blur(24px)",
+              borderRadius: "50%",
+            }}
+          />
+        ))}
 
         {/* Dismiss tooltip when clicking image background */}
         {activeId !== null && (
@@ -805,7 +831,7 @@ interface UnlockedProps {
 }
 
 function UnlockedState({ imageUrl, unlockData, credits, onScanAnother }: UnlockedProps) {
-  const { mode, items, claudeRaw } = unlockData;
+  const { mode, items, claudeRaw, faces } = unlockData;
 
   return (
     <div className="flex flex-col items-center gap-6 w-full max-w-md mx-auto px-4 py-10">
@@ -818,7 +844,7 @@ function UnlockedState({ imageUrl, unlockData, credits, onScanAnother }: Unlocke
       </div>
 
       {/* Content based on mode */}
-      {mode === "person" && <PersonMode imageUrl={imageUrl} items={items} />}
+      {mode === "person" && <PersonMode imageUrl={imageUrl} items={items} faces={faces ?? []} />}
       {mode === "car"    && <CarMode claudeRaw={claudeRaw} items={items} />}
       {mode === "item"   && items.length > 0 && (
         <div className="w-full flex flex-col gap-4">
