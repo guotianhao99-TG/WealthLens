@@ -133,7 +133,7 @@ async function compressToBase64(file: File): Promise<string> {
     const img = new window.Image();
     const url = URL.createObjectURL(file);
     img.onload = () => {
-      const MAX = 800;
+      const MAX = 1600;
       let { width, height } = img;
       if (width > MAX || height > MAX) {
         if (width >= height) { height = Math.round((height * MAX) / width); width = MAX; }
@@ -144,7 +144,7 @@ async function compressToBase64(file: File): Promise<string> {
       const ctx = canvas.getContext("2d")!;
       ctx.drawImage(img, 0, 0, width, height);
       URL.revokeObjectURL(url);
-      resolve(canvas.toDataURL("image/jpeg", 0.85).split(",")[1]);
+      resolve(canvas.toDataURL("image/jpeg", 0.92).split(",")[1]);
     };
     img.onerror = reject;
     img.src = url;
