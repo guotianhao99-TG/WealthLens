@@ -106,6 +106,15 @@ interface UnlockData {
 
 const GOLD = "#C9A84C";
 
+/** 当 brand 为 Unknown 时只显示 model 描述，否则显示 "Brand Model" */
+function itemLabel(brand: string, model: string, year?: string): string {
+  const b = (brand ?? "").trim();
+  const m = (model ?? "").trim();
+  const y = year ? ` (${year})` : "";
+  if (!b || b === "Unknown") return `${m}${y}`;
+  return `${b} ${m}${y}`;
+}
+
 const LOADING_MESSAGES = [
   "Scanning items...",
   "Checking market prices...",
@@ -389,7 +398,7 @@ function LockedState({ imageUrl, analyzeData, user, onUnlocked, onUserUpdate }: 
             <div className="flex justify-between items-start" style={{ filter: "blur(4px)", userSelect: "none" }}>
               <div>
                 <p className="font-semibold text-white text-sm">Item #{item.id}</p>
-                <p className="text-zinc-400 text-xs mt-0.5">{item.brand} · {item.model}</p>
+                <p className="text-zinc-400 text-xs mt-0.5">{itemLabel(item.brand, item.model)}</p>
               </div>
               <p className="text-sm font-medium" style={{ color: GOLD }}>{item.priceRange}</p>
             </div>
@@ -525,8 +534,7 @@ function ItemCard({ item, index }: { item: FullItem; index: number }) {
             </span>
           </div>
           <p className="text-base font-bold mt-0.5" style={{ color: GOLD }}>
-            {item.brand} {item.model}
-            {item.year ? ` (${item.year})` : ""}
+            {itemLabel(item.brand, item.model, item.year)}
           </p>
           <p className="text-sm text-white mt-0.5">{item.priceRange}</p>
         </div>
@@ -697,8 +705,7 @@ function PersonMode({ imageUrl, items, faces = [] }: { imageUrl: string; items: 
                     {categoryIcon(item.category)} {item.category}
                   </p>
                   <p className="text-sm font-bold leading-tight" style={{ color: GOLD }}>
-                    {item.brand} {item.model}
-                    {item.year ? ` (${item.year})` : ""}
+                    {itemLabel(item.brand, item.model, item.year)}
                   </p>
                   <p className="text-xs text-white mt-1">{item.priceRange}</p>
                   <p className="text-xs text-zinc-500 mt-0.5">{item.confidence}% confidence</p>
