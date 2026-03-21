@@ -172,21 +172,56 @@ function isVintageBrand(brand: string): boolean {
 }
 
 /**
- * Build the appropriate Serper shopping search query for a fashion/goods item.
- * Queries are sent to Serper /shopping which does NOT support site: operators —
- * keeping queries simple lets the shopping API return actual priced listings.
- * - Active brands          → "[brand] [model] buy price"
- * - Unknown brand          → "[model] price"
- * - Vintage/discontinued   → "[brand] [model] resale secondhand price"
+ * Known luxury / high-end brands. Items from these brands:
+ *  - Use premium retail site: queries (Farfetch, Net-a-Porter, etc.)
+ *  - Have a $50 price floor — prices below that are treated as invalid.
  */
-function buildItemSearchQuery(brand: string, model: string): string {
+const LUXURY_BRANDS = new Set([
+  "louis vuitton", "lv", "chanel", "gucci", "hermès", "hermes",
+  "prada", "burberry", "dior", "christian dior", "fendi",
+  "balenciaga", "saint laurent", "ysl", "bottega veneta",
+  "rolex", "omega", "cartier", "audemars piguet", "ap",
+  "patek philippe", "richard mille", "iwc", "jaeger-lecoultre",
+  "tag heuer", "breitling", "vacheron constantin",
+  "givenchy", "valentino", "versace", "dolce & gabbana",
+  "moncler", "canada goose", "off-white", "acne studios",
+  "the row", "celine", "céline", "loro piana",
+  "alexander mcqueen", "mcm", "coach", "kate spade",
+  "tiffany", "tiffany & co", "van cleef & arpels",
+  "bulgari", "bvlgari", "loewe", "jacquemus", "isabel marant",
+  "max mara", "brunello cucinelli", "kiton", "zegna",
+  "ralph lauren purple label", "tom ford",
+]);
+
+/** Returns true when a brand is a known luxury / high-end label. */
+function isLuxuryBrand(brand: string): boolean {
+  return LUXURY_BRANDS.has(brand.toLowerCase().trim());
+}
+
+/**
+ * Build the Serper search query for a fashion/goods item.
+ *
+ * - Known luxury brand  → site:-targeted premium retail query
+ *   (uses /search endpoint — Serper /shopping ignores site: operators)
+ * - Unknown brand       → site:-targeted mass-market query using the
+ *   category + visual description that GPT returns as the model field
+ * - Vintage/discontinued → resale / secondhand query (shopping endpoint)
+ * - Other active brand  → simple shopping query (shopping endpoint)
+ */
+function buildItemSearchQuery(brand: string, model: string, category = ""): string {
   const b = (brand ?? "").trim();
   const m = (model ?? "").trim();
+  const cat = (category ?? "").trim();
+
   if (!b || b === "Unknown") {
-    return `${m} price`;
+    const descriptor = cat ? `${cat} ${m}` : m;
+    return `${descriptor} price site:asos.com OR site:zara.com OR site:hm.com`;
   }
   if (isVintageBrand(b)) {
     return `${b} ${m} resale secondhand price`;
+  }
+  if (isLuxuryBrand(b)) {
+    return `${b} ${m} price site:farfetch.com OR site:net-a-porter.com OR site:mrporter.com OR site:ssense.com`;
   }
   return `${b} ${m} buy price`;
 }
@@ -263,11 +298,12 @@ async function fetchSerperListings(query: string): Promise<SerperListing[]> {
 }
 
 /**
- * Fetch automotive pricing results from Serper web search.
- * Uses the /search endpoint so site: operators (cars.com, autotrader, edmunds)
- * are respected — the Serper /shopping endpoint does not index those sites.
+ * Fetch pricing results via Serper web search (/search endpoint).
+ * Used for any query that contains site: operators — luxury brands,
+ * unknown-brand mass-market items, and automotive queries.
+ * The Serper /shopping endpoint does NOT honour site: operators.
  */
-async function fetchSerperAutomotiveListings(query: string): Promise<SerperListing[]> {
+async function fetchSerperWebListings(query: string): Promise<SerperListing[]> {
   try {
     const res = await fetch("https://google.serper.dev/search", {
       method: "POST",
@@ -384,10 +420,11 @@ export async function POST(req: NextRequest) {
         normalizedItems = personData.items ?? [];
         faces = personData.faces ?? [];
       }
-      // Override searchQuery with our retail/resale helper
+      // Override searchQuery with our retail/resale helper (pass category for
+      // unknown-brand queries so we can include it in the site:-targeted search)
       normalizedItems = normalizedItems.map((item) => ({
         ...item,
-        searchQuery: buildItemSearchQuery(item.brand, item.model),
+        searchQuery: buildItemSearchQuery(item.brand, item.model, item.category),
       }));
 
     } else if (typedMode === "car") {
@@ -412,7 +449,7 @@ export async function POST(req: NextRequest) {
         ? possibleYears[Math.floor(possibleYears.length / 2)]
         : "";
       const seriesToken = series ? ` ${series}` : "";
-      const searchQuery = `${yearToken ? yearToken + " " : ""}${brand}${seriesToken} ${carModel} new price OR used price site:cars.com OR site:autotrader.com OR site:edmunds.com`;
+      const searchQuery = `${yearToken ? yearToken + " " : ""}${brand}${seriesToken} ${carModel} price site:autotrader.com OR site:cars.com OR site:edmunds.com`;
 
       normalizedItems = [{
         id: 1,
@@ -430,23 +467,45 @@ export async function POST(req: NextRequest) {
       normalizedItems = [{
         ...item,
         id: 1,
-        searchQuery: buildItemSearchQuery(item.brand, item.model),
+        searchQuery: buildItemSearchQuery(item.brand, item.model, item.category),
       }];
     }
 
     // ── 4. Call Serper in parallel for every item ─────────────────────────────
+    // Queries containing "site:" must go through the /search endpoint.
+    // Simple shopping queries use the /shopping endpoint.
     const allListings = await Promise.all(
-      normalizedItems.map((item) =>
-        item.category === "car"
-          ? fetchSerperAutomotiveListings(item.searchQuery)
-          : fetchSerperListings(item.searchQuery)
-      )
+      normalizedItems.map((item) => {
+        const usesWebSearch =
+          item.category === "car" ||
+          isLuxuryBrand(item.brand) ||
+          !item.brand ||
+          item.brand === "Unknown";
+        return usesWebSearch
+          ? fetchSerperWebListings(item.searchQuery)
+          : fetchSerperListings(item.searchQuery);
+      })
     );
 
     // ── 5. Assemble enriched items ────────────────────────────────────────────
+    const LUXURY_PRICE_FLOOR = 50; // Any price below this for a luxury brand is flagged as invalid
+
     const enrichedItems: EnrichedItem[] = normalizedItems.map((item, i) => {
       const listings = allListings[i];
-      const prices = extractPrices(listings);
+      let prices = extractPrices(listings);
+
+      // Luxury price-floor guard: if every returned price is suspiciously low
+      // for the identified brand, discard them and surface "Price unavailable".
+      if (isLuxuryBrand(item.brand)) {
+        const validPrices = prices.filter((p) => p >= LUXURY_PRICE_FLOOR);
+        if (validPrices.length < prices.length) {
+          console.warn(
+            `[analyze] Luxury brand "${item.brand}" — dropping ${prices.length - validPrices.length} price(s) below $${LUXURY_PRICE_FLOOR}`
+          );
+        }
+        prices = validPrices;
+      }
+
       const minPrice = prices.length ? Math.min(...prices) : 0;
       const maxPrice = prices.length ? Math.max(...prices) : 0;
       const score = sumRiskScore(item.visualAnomalies ?? []);
@@ -458,7 +517,7 @@ export async function POST(req: NextRequest) {
         priceRange:
           prices.length
             ? `$${minPrice.toLocaleString("en-US")} - $${maxPrice.toLocaleString("en-US")}`
-            : "N/A",
+            : "Price unavailable",
         riskScore: score,
         riskLevel: toRiskLevel(score),
         listings,
