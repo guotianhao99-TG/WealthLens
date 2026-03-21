@@ -333,28 +333,19 @@ async function fetchSerperWebListings(query: string): Promise<SerperListing[]> {
 }
 
 /**
- * Fetch web-search results for pricing (honours site: operators) AND run a
- * parallel shopping search purely to harvest product thumbnails — since
- * Serper's /search organic results rarely carry imageUrl.
- * The shopping thumbnails are stitched onto the web-search listings so each
- * card shows a real product image.
+ * For any query that may contain site: operators (luxury brands, unknown
+ * brands, cars): strip those operators and run a standard /shopping search.
+ * The /shopping endpoint ignores site: operators anyway, and — critically —
+ * it returns a structured `price` field instead of a free-form snippet, so
+ * prices are always real retail/market values rather than garbage numbers
+ * parsed out of web-page text.
  */
-async function fetchSerperWebListingsWithThumbnails(query: string): Promise<SerperListing[]> {
-  // Strip site: operators so the shopping query still returns broad results
-  const shoppingQuery = query
+function stripSiteOperators(query: string): string {
+  return query
     .replace(/ site:\S+/gi, "")
     .replace(/\s+OR\s+/g, " ")
+    .replace(/\s+/g, " ")
     .trim();
-
-  const [webResults, shoppingResults] = await Promise.all([
-    fetchSerperWebListings(query),
-    fetchSerperListings(shoppingQuery),
-  ]);
-
-  return webResults.map((r, i) => ({
-    ...r,
-    thumbnail: r.thumbnail || shoppingResults[i]?.thumbnail || "",
-  }));
 }
 
 // Extract JSON from GPT response — handle markdown code blocks and extra text
@@ -500,31 +491,29 @@ export async function POST(req: NextRequest) {
       }];
     }
 
-    // ── 4. Call Serper in parallel for every item ─────────────────────────────
-    // Queries containing "site:" must go through the /search endpoint.
-    // Simple shopping queries use the /shopping endpoint.
+    // ── 4. Call Serper /shopping in parallel for every item ───────────────────
+    // Always use the /shopping endpoint: it returns a structured `price` field
+    // (e.g. "$1,234") rather than free-form snippet text, which prevents
+    // garbage values like "$0.14" from being parsed as real prices.
+    // site: operators are stripped because /shopping ignores them anyway.
     const allListings = await Promise.all(
-      normalizedItems.map((item) => {
-        const usesWebSearch =
-          item.category === "car" ||
-          isLuxuryBrand(item.brand) ||
-          !item.brand ||
-          item.brand === "Unknown";
-        return usesWebSearch
-          ? fetchSerperWebListingsWithThumbnails(item.searchQuery)
-          : fetchSerperListings(item.searchQuery);
-      })
+      normalizedItems.map((item) =>
+        fetchSerperListings(stripSiteOperators(item.searchQuery))
+      )
     );
 
     // ── 5. Assemble enriched items ────────────────────────────────────────────
-    const LUXURY_PRICE_FLOOR = 50; // Any price below this for a luxury brand is flagged as invalid
+    // Prices below this floor for a luxury brand are treated as invalid data.
+    const LUXURY_PRICE_FLOOR = 50;
+    // A price range requires at least 2 valid data points; a single price is
+    // not shown (range would be "$X – $X" which is misleading).
+    const MIN_PRICES_FOR_RANGE = 2;
 
     const enrichedItems: EnrichedItem[] = normalizedItems.map((item, i) => {
       const listings = allListings[i];
       let prices = extractPrices(listings);
 
-      // Luxury price-floor guard: if every returned price is suspiciously low
-      // for the identified brand, discard them and surface "Price unavailable".
+      // Luxury price-floor guard: drop prices suspiciously low for the brand.
       if (isLuxuryBrand(item.brand)) {
         const validPrices = prices.filter((p) => p >= LUXURY_PRICE_FLOOR);
         if (validPrices.length < prices.length) {
@@ -535,18 +524,18 @@ export async function POST(req: NextRequest) {
         prices = validPrices;
       }
 
-      const minPrice = prices.length ? Math.min(...prices) : 0;
-      const maxPrice = prices.length ? Math.max(...prices) : 0;
+      const hasRange = prices.length >= MIN_PRICES_FOR_RANGE;
+      const minPrice = hasRange ? Math.min(...prices) : 0;
+      const maxPrice = hasRange ? Math.max(...prices) : 0;
       const score = sumRiskScore(item.visualAnomalies ?? []);
 
       return {
         ...item,
         id: item.id ?? i + 1,
         visualAnomalies: item.visualAnomalies ?? [],
-        priceRange:
-          prices.length
-            ? `$${minPrice.toLocaleString("en-US")} - $${maxPrice.toLocaleString("en-US")}`
-            : "Price unavailable",
+        priceRange: hasRange
+          ? `$${minPrice.toLocaleString("en-US")} – $${maxPrice.toLocaleString("en-US")}`
+          : "Price unavailable",
         riskScore: score,
         riskLevel: toRiskLevel(score),
         listings,
