@@ -282,14 +282,22 @@ function PreviewState({
         </h1>
       </div>
 
-      {/* Image preview — contain so full image is always visible */}
-      <div className="relative w-full rounded-2xl overflow-hidden" style={{ border: "1px solid #2a2a2a", background: "#111" }}>
+      {/* Image preview — contain so the full image is always visible regardless of aspect ratio */}
+      <div
+        className="relative w-full rounded-2xl overflow-hidden"
+        style={{
+          border: "1px solid #2a2a2a",
+          background: "#111",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src={imageUrl}
           alt="Preview"
-          className="w-full"
-          style={{ objectFit: "contain", maxHeight: 480, display: "block" }}
+          style={{ maxWidth: "100%", maxHeight: 480, objectFit: "contain", display: "block" }}
         />
 
         {/* Remove button — top-right corner */}
@@ -327,13 +335,15 @@ function LoadingState({ imageUrl }: { imageUrl: string }) {
   return (
     <div className="flex flex-col items-center gap-8 w-full max-w-md mx-auto px-4 py-12">
       <h1 className="text-3xl font-bold" style={{ color: GOLD }}>WealthLens</h1>
-      <div className="relative w-full rounded-2xl overflow-hidden" style={{ maxHeight: 320 }}>
+      <div
+        className="relative w-full rounded-2xl overflow-hidden"
+        style={{ background: "#111", display: "flex", alignItems: "center", justifyContent: "center" }}
+      >
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src={imageUrl}
           alt="Analyzing"
-          className="w-full object-cover"
-          style={{ filter: "blur(8px)", opacity: 0.5, maxHeight: 320 }}
+          style={{ maxWidth: "100%", maxHeight: 320, objectFit: "contain", display: "block", filter: "blur(8px)", opacity: 0.5 }}
         />
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="gold-spinner" />
@@ -921,7 +931,7 @@ function UnlockedState({ imageUrl, unlockData, credits, onScanAnother }: Unlocke
       {mode === "item"   && items.length > 0 && (
         <div className="w-full flex flex-col gap-4">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={imageUrl} alt="Item" className="w-full rounded-2xl object-cover" style={{ maxHeight: 320 }} />
+          <img src={imageUrl} alt="Item" className="w-full rounded-2xl" style={{ maxHeight: 400, objectFit: "contain", display: "block", background: "#111" }} />
           <ItemCard item={items[0]} index={0} />
           {items[0].minPrice > 0 || items[0].maxPrice > 0 ? (
             <div className="w-full rounded-xl py-4 px-5 text-center"

@@ -316,16 +316,45 @@ async function fetchSerperWebListings(query: string): Promise<SerperListing[]> {
     if (!res.ok) return [];
     const data = (await res.json()) as {
       organic?: Array<{ title?: string; snippet?: string; link?: string; imageUrl?: string }>;
+      // Serper /search returns a top-level `images` array alongside organic results;
+      // we use these as thumbnails because individual organic entries rarely carry imageUrl.
+      images?: Array<{ imageUrl?: string; title?: string; link?: string }>;
     };
-    return (data.organic ?? []).slice(0, 3).map((r) => ({
+    const imgSlots = data.images ?? [];
+    return (data.organic ?? []).slice(0, 3).map((r, i) => ({
       title: r.title ?? "",
       price: r.snippet ?? "",
-      thumbnail: r.imageUrl ?? "",
+      thumbnail: r.imageUrl ?? imgSlots[i]?.imageUrl ?? "",
       link: r.link ?? `https://www.google.com/search?q=${encodeURIComponent(query)}`,
     }));
   } catch {
     return [];
   }
+}
+
+/**
+ * Fetch web-search results for pricing (honours site: operators) AND run a
+ * parallel shopping search purely to harvest product thumbnails — since
+ * Serper's /search organic results rarely carry imageUrl.
+ * The shopping thumbnails are stitched onto the web-search listings so each
+ * card shows a real product image.
+ */
+async function fetchSerperWebListingsWithThumbnails(query: string): Promise<SerperListing[]> {
+  // Strip site: operators so the shopping query still returns broad results
+  const shoppingQuery = query
+    .replace(/ site:\S+/gi, "")
+    .replace(/\s+OR\s+/g, " ")
+    .trim();
+
+  const [webResults, shoppingResults] = await Promise.all([
+    fetchSerperWebListings(query),
+    fetchSerperListings(shoppingQuery),
+  ]);
+
+  return webResults.map((r, i) => ({
+    ...r,
+    thumbnail: r.thumbnail || shoppingResults[i]?.thumbnail || "",
+  }));
 }
 
 // Extract JSON from GPT response — handle markdown code blocks and extra text
@@ -482,7 +511,7 @@ export async function POST(req: NextRequest) {
           !item.brand ||
           item.brand === "Unknown";
         return usesWebSearch
-          ? fetchSerperWebListings(item.searchQuery)
+          ? fetchSerperWebListingsWithThumbnails(item.searchQuery)
           : fetchSerperListings(item.searchQuery);
       })
     );
