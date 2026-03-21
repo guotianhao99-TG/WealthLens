@@ -12,7 +12,7 @@ import { v4 as uuidv4 } from "uuid";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type AppState = "home" | "loading" | "locked" | "unlocked";
+type AppState = "home" | "preview" | "loading" | "locked" | "unlocked";
 type ScanMode = "person" | "car" | "item";
 
 interface LocalUser {
@@ -116,16 +116,16 @@ function itemLabel(brand: string, model: string, year?: string): string {
 }
 
 const LOADING_MESSAGES = [
-  "Scanning items...",
+  "Analyzing outfit...",
   "Checking market prices...",
   "Calculating total value...",
   "Almost ready...",
 ];
 
-const MODE_OPTIONS: { mode: ScanMode; emoji: string; label: string }[] = [
-  { mode: "person", emoji: "👗", label: "Scan Person" },
-  { mode: "car",    emoji: "🚗", label: "Scan Car"    },
-  { mode: "item",   emoji: "👜", label: "Scan Item"   },
+const MODE_OPTIONS: { mode: ScanMode; emoji: string; label: string; description: string }[] = [
+  { mode: "person", emoji: "👗", label: "Outfit",  description: "Identify everything someone is wearing" },
+  { mode: "car",    emoji: "🚗", label: "Vehicle", description: "Get market value for any car"           },
+  { mode: "item",   emoji: "👜", label: "Item",    description: "Price a single luxury piece"            },
 ];
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
@@ -191,15 +191,16 @@ function HomeState({ mode, onModeChange, onImageSelected, error }: HomeProps) {
     if (file) onImageSelected(file);
   }, [onImageSelected]);
 
+  const activeMode = MODE_OPTIONS.find((m) => m.mode === mode);
+
   return (
     <div className="flex flex-col items-center gap-8 w-full max-w-md mx-auto px-4 py-12">
       {/* Logo */}
       <div className="text-center">
         <h1 className="text-4xl font-bold tracking-tight" style={{ color: GOLD }}>
-          WealthLens
+          Identify &amp; Price Any Outfit
         </h1>
-        <p className="mt-2 text-xl font-medium text-white">How much is that person worth?</p>
-        <p className="mt-1 text-sm text-zinc-400">Upload any photo. AI scans everything.</p>
+        <p className="mt-2 text-sm text-zinc-400">Upload a photo. Get instant brand IDs and market prices.</p>
       </div>
 
       {/* Mode selector */}
@@ -220,6 +221,11 @@ function HomeState({ mode, onModeChange, onImageSelected, error }: HomeProps) {
           </button>
         ))}
       </div>
+
+      {/* Active mode description */}
+      {activeMode && (
+        <p className="text-xs text-zinc-500 text-center -mt-4">{activeMode.description}</p>
+      )}
 
       {/* Upload area */}
       <div
@@ -253,6 +259,33 @@ function HomeState({ mode, onModeChange, onImageSelected, error }: HomeProps) {
           {error}
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── PREVIEW STATE ────────────────────────────────────────────────────────────
+
+function PreviewState({ imageUrl, onScanNow }: { imageUrl: string; onScanNow: () => void }) {
+  return (
+    <div className="flex flex-col items-center gap-6 w-full max-w-md mx-auto px-4 py-12">
+      <div className="text-center">
+        <h1 className="text-4xl font-bold tracking-tight" style={{ color: GOLD }}>
+          Identify &amp; Price Any Outfit
+        </h1>
+      </div>
+
+      <div className="w-full rounded-2xl overflow-hidden" style={{ border: "1px solid #2a2a2a" }}>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={imageUrl} alt="Preview" className="w-full object-cover" style={{ maxHeight: 360 }} />
+      </div>
+
+      <button
+        onClick={onScanNow}
+        className="w-full py-4 rounded-xl font-semibold text-base transition-all hover:opacity-90"
+        style={{ background: GOLD, color: "#0a0a0a" }}
+      >
+        🔍 Scan Now
+      </button>
     </div>
   );
 }
@@ -851,10 +884,11 @@ function UnlockedState({ imageUrl, unlockData, credits, onScanAnother }: Unlocke
     <div className="flex flex-col items-center gap-6 w-full max-w-md mx-auto px-4 py-10">
       <h1 className="text-3xl font-bold self-start" style={{ color: GOLD }}>WealthLens</h1>
 
-      {/* Mode badge */}
+      {/* Mode badge / results title */}
       <div className="self-start flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium"
         style={{ background: "rgba(201,168,76,0.1)", border: `1px solid rgba(201,168,76,0.3)`, color: GOLD }}>
-        {MODE_OPTIONS.find((m) => m.mode === mode)?.emoji} Results Unlocked
+        {MODE_OPTIONS.find((m) => m.mode === mode)?.emoji}{" "}
+        {mode === "person" ? "Outfit Breakdown" : mode === "car" ? "Vehicle Analysis" : "Item Analysis"}
       </div>
 
       {/* Content based on mode */}
@@ -896,8 +930,7 @@ function UnlockedState({ imageUrl, unlockData, credits, onScanAnother }: Unlocke
 
         {/* Disclaimer */}
         <p className="text-xs text-zinc-600 text-center leading-relaxed px-2">
-          AI estimates for reference only. Not financial or authentication advice.
-          WealthLens is not liable for decisions made based on these results.
+          AI estimates for reference only. Prices reflect current market listings.
         </p>
       </div>
     </div>
@@ -911,6 +944,7 @@ export default function WealthLens() {
   const [mode, setMode]               = useState<ScanMode>("person");
   const [user, setUser]               = useState<LocalUser | null>(null);
   const [imageUrl, setImageUrl]       = useState<string>("");
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [analyzeData, setAnalyzeData] = useState<AnalyzeResponse | null>(null);
   const [unlockData, setUnlockData]   = useState<UnlockData | null>(null);
   const [error, setError]             = useState<string | null>(null);
@@ -923,16 +957,23 @@ export default function WealthLens() {
     setUser(updated);
   }, []);
 
-  const handleImageSelected = useCallback(async (file: File) => {
-    if (!user) return;
+  // Step 1: user selects a photo → show preview, don't scan yet
+  const handleImageSelected = useCallback((file: File) => {
     setError(null);
-    // Show preview URL immediately
     const previewUrl = URL.createObjectURL(file);
     setImageUrl(previewUrl);
+    setSelectedFile(file);
+    setAppState("preview");
+  }, []);
+
+  // Step 2: user clicks "Scan Now" → kick off the API call
+  const handleScanNow = useCallback(async () => {
+    if (!user || !selectedFile) return;
+    setError(null);
     setAppState("loading");
 
     try {
-      const base64 = await fileToBase64(file);
+      const base64 = await fileToBase64(selectedFile);
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -950,7 +991,7 @@ export default function WealthLens() {
       setError("Network error. Please check your connection and try again.");
       setAppState("home");
     }
-  }, [user, mode]);
+  }, [user, selectedFile, mode]);
 
   const handleUnlocked = useCallback((data: UnlockData) => {
     setUnlockData(data);
@@ -962,6 +1003,7 @@ export default function WealthLens() {
     setAnalyzeData(null);
     setUnlockData(null);
     setImageUrl("");
+    setSelectedFile(null);
     setError(null);
   }, []);
 
@@ -974,6 +1016,10 @@ export default function WealthLens() {
           onImageSelected={handleImageSelected}
           error={error}
         />
+      )}
+
+      {appState === "preview" && (
+        <PreviewState imageUrl={imageUrl} onScanNow={handleScanNow} />
       )}
 
       {appState === "loading" && (
