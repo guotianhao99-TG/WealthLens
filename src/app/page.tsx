@@ -265,7 +265,15 @@ function HomeState({ mode, onModeChange, onImageSelected, error }: HomeProps) {
 
 // ─── PREVIEW STATE ────────────────────────────────────────────────────────────
 
-function PreviewState({ imageUrl, onScanNow }: { imageUrl: string; onScanNow: () => void }) {
+function PreviewState({
+  imageUrl,
+  onScanNow,
+  onRemove,
+}: {
+  imageUrl: string;
+  onScanNow: () => void;
+  onRemove: () => void;
+}) {
   return (
     <div className="flex flex-col items-center gap-6 w-full max-w-md mx-auto px-4 py-12">
       <div className="text-center">
@@ -274,9 +282,25 @@ function PreviewState({ imageUrl, onScanNow }: { imageUrl: string; onScanNow: ()
         </h1>
       </div>
 
-      <div className="w-full rounded-2xl overflow-hidden" style={{ border: "1px solid #2a2a2a" }}>
+      {/* Image preview — contain so full image is always visible */}
+      <div className="relative w-full rounded-2xl overflow-hidden" style={{ border: "1px solid #2a2a2a", background: "#111" }}>
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={imageUrl} alt="Preview" className="w-full object-cover" style={{ maxHeight: 360 }} />
+        <img
+          src={imageUrl}
+          alt="Preview"
+          className="w-full"
+          style={{ objectFit: "contain", maxHeight: 480, display: "block" }}
+        />
+
+        {/* Remove button — top-right corner */}
+        <button
+          onClick={onRemove}
+          aria-label="Remove photo"
+          className="absolute top-3 right-3 flex items-center justify-center w-8 h-8 rounded-full transition-opacity hover:opacity-80"
+          style={{ background: "rgba(0,0,0,0.65)", border: "1px solid rgba(255,255,255,0.2)", color: "#fff", fontSize: 16, lineHeight: 1 }}
+        >
+          ✕
+        </button>
       </div>
 
       <button
@@ -1019,7 +1043,7 @@ export default function WealthLens() {
       )}
 
       {appState === "preview" && (
-        <PreviewState imageUrl={imageUrl} onScanNow={handleScanNow} />
+        <PreviewState imageUrl={imageUrl} onScanNow={handleScanNow} onRemove={handleScanAnother} />
       )}
 
       {appState === "loading" && (
